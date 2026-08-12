@@ -2,15 +2,15 @@
     "_comment": "域名级配置覆盖",
     "www.tycng.com": {
         "waf_enable": "on",
-        "waf_mode": "block",
-        "cc_rate": 120,
-        "cc_window": 60
+        "url_check": "on",
+        "cc_rate": "120/60",
+        "cc_block_ttl": 600
     },
     "sub.wyfc.qzz.io": {
         "waf_enable": "on",
-        "waf_mode": "block",
-        "post_enable": "off",
-        "cc_rate": 500,
-        "cc_window": 60
+        "post_check": "off",
+        "cc_rate": "500/60",
+        "cc_block_ttl": 600,
+        "rule_dir": "domains/sub.wyfc.qzz.io"
     }
 }

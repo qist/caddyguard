@@ -3,36 +3,48 @@ package caddyguard
 import (
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
 // ccAttackCheck CC 攻击检测
 // 基于滑动窗口的速率限制，超阈值自动拉黑
 func (g *Guard) ccAttackCheck(w http.ResponseWriter, r *http.Request, cfg Config) bool {
-	if cfg.CCEnable != "on" {
+	if cfg.CCCheck != "on" {
+		return false
+	}
+
+	// 解析 cc_rate: "60/60" → count=60, seconds=60
+	parts := strings.Split(cfg.CCRate, "/")
+	if len(parts) != 2 {
+		return false
+	}
+	ccCount, _ := strconv.Atoi(parts[0])
+	ccSeconds, _ := strconv.Atoi(parts[1])
+	if ccCount == 0 || ccSeconds == 0 {
 		return false
 	}
 
 	clientIP := g.getClientIP(r, cfg)
+	uri := r.URL.Path
+	ccKey := clientIP + uri
 
-	// 构造 CC 计数 key：IP + URI（对应 Lua 版 cc_key）
-	ccKey := clientIP + r.URL.Path
+	// 通过存储接口计数（内存或 Redis）
+	count := g.ccStore.Incr(ccKey, time.Duration(ccSeconds)*time.Second)
 
-	// 递增计数
-	window := time.Duration(cfg.CCWindow) * time.Second
-	count := g.ccStore.Incr(ccKey, window)
+	if count > ccCount {
+		logData := fmt.Sprintf("count=%d threshold=%d window=%ds", count, ccCount, ccSeconds)
+		g.logger.Record("CCAttack", r.URL.RequestURI(), logData, "CC Rate Limit", clientIP, r, cfg)
 
-	// 超阈值 → 自动拉黑
-	if count > cfg.CCRate {
-		banTime := time.Duration(cfg.CCBanTime) * time.Second
-		g.ccStore.Ban(clientIP, banTime)
-
-		logData := fmt.Sprintf("count=%d threshold=%d window=%ds", count, cfg.CCRate, cfg.CCWindow)
-		g.logger.Record("CCAttack", r.URL.String(), logData, "CC Rate Limit", clientIP, r, cfg)
-
-		if cfg.WAFMode == "block" {
-			g.wafOutput(w, cfg)
+		// 自动拉黑
+		if cfg.CCBlockTTL > 0 {
+			if !g.ccStore.IsBanned(clientIP) {
+				g.ccStore.Ban(clientIP, time.Duration(cfg.CCBlockTTL)*time.Second)
+			}
 		}
+
+		g.wafOutput(w, cfg)
 		return true
 	}
 

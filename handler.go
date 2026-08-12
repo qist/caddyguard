@@ -59,11 +59,13 @@ func (g *Guard) runChecks(w http.ResponseWriter, r *http.Request, cfg Config) bo
 }
 
 // wafOutput 输出拦截响应
+// waf_output: "html" → 返回拦截页面，"redirect" → 302 跳转
 func (g *Guard) wafOutput(w http.ResponseWriter, cfg Config) {
 	if cfg.WAFOutput == "redirect" {
 		http.Redirect(w, nil, cfg.WAFRedirectURL, http.StatusMovedPermanently)
 		return
 	}
+	// 默认 html
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusForbidden)
 	w.Write([]byte(defaultHTML))

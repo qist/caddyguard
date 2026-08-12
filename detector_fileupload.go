@@ -1,75 +1,61 @@
 package caddyguard
 
 import (
-	"mime"
+	"io"
 	"net/http"
-	"path/filepath"
 	"strings"
 )
 
-// fileUploadCheck 文件上传检测
-// 检查 multipart form 中的文件扩展名是否在黑名单中
+// fileUploadCheck 文件上传检测（multipart header 级别）
+// 不完整读取 body，仅解析 multipart header 中的 filename，对 filename 执行规则匹配
 func (g *Guard) fileUploadCheck(w http.ResponseWriter, r *http.Request, cfg Config) bool {
-	if cfg.FileUploadEnable != "on" {
-		return false
-	}
-
-	// 只检测 multipart/form-data
-	ct := r.Header.Get("Content-Type")
-	if !strings.HasPrefix(ct, "multipart/form-data") {
-		return false
-	}
-
-	// 解析 multipart form
-	// 限制内存大小 32MB，超出部分写入临时文件
-	maxMemory := int64(32 << 20)
-	if err := r.ParseMultipartForm(maxMemory); err != nil {
-		return false
-	}
-
-	if r.MultipartForm == nil || r.MultipartForm.File == nil {
+	if cfg.FileUploadCheck != "on" {
 		return false
 	}
 
 	rules := g.ruleCache.GetRule("fileext.rule", cfg.RuleDir)
-
-	for _, files := range r.MultipartForm.File {
-		for _, fileHeader := range files {
-			filename := fileHeader.Filename
-			if filename == "" {
-				continue
-			}
-
-			ext := strings.ToLower(filepath.Ext(filename))
-
-			// 黑名单扩展名检测
-			if matched := matchRules(ext, rules, false); matched != nil {
-				g.logger.Record("FileUpload", r.URL.String(), filename, matched.Raw, g.getClientIP(r, cfg), r, cfg)
-				if cfg.WAFMode == "block" {
-					g.wafOutput(w, cfg)
-				}
-				return true
-			}
-
-			// 检查 Content-Type 是否与扩展名匹配
-			// 防止通过修改扩展名绕过检测
-			if fileHeader.Header != nil {
-				declaredCT := fileHeader.Header.Get("Content-Type")
-				if declaredCT != "" {
-					exts, _ := mime.ExtensionsByType(declaredCT)
-					if len(exts) > 0 {
-						detectedExt := strings.ToLower(filepath.Ext(exts[0]))
-						if detectedExt != "" && detectedExt != ext {
-							g.logger.Record("FileUpload", r.URL.String(), filename, "MimeMismatch: "+declaredCT, g.getClientIP(r, cfg), r, cfg)
-							if cfg.WAFMode == "block" {
-								g.wafOutput(w, cfg)
-							}
-							return true
-						}
-					}
-				}
-			}
-		}
+	if rules == nil {
+		return false
 	}
+
+	contentType := r.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "multipart/form-data") {
+		return false
+	}
+
+	// 使用 multipart.Reader 流式解析，只读 header 不读文件内容
+	reader, err := r.MultipartReader()
+	if err != nil {
+		return false
+	}
+
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+
+		// 只检查 filename，不读取文件内容
+		filename := part.FileName()
+		if filename == "" {
+			part.Close()
+			continue
+		}
+
+		// 对 filename 进行规则匹配
+		if matched := matchRules(filename, rules, false); matched != nil {
+			part.Close()
+			g.logger.Record("FileUpload", r.URL.RequestURI(), filename, matched.Raw, g.getClientIP(r, cfg), r, cfg)
+			g.wafOutput(w, cfg)
+			return true
+		}
+
+		// 不需要读取文件内容，直接关闭
+		part.Close()
+	}
+
 	return false
 }

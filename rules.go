@@ -218,13 +218,21 @@ func (rc *RuleCache) GetDomainConfig(domain string) map[string]map[string]interf
 		return nil
 	}
 
-	var configs map[string]map[string]interface{}
-	if err := json.Unmarshal(content, &configs); err != nil {
+	// 先解析为 RawMessage，跳过非对象值（如 _comment 字符串）
+	var rawConfigs map[string]json.RawMessage
+	if err := json.Unmarshal(content, &rawConfigs); err != nil {
 		return nil
 	}
 
-	// 删除 _comment
-	delete(configs, "_comment")
+	configs := make(map[string]map[string]interface{})
+	for key, rawVal := range rawConfigs {
+		// 尝试解析为 map[string]interface{}，非对象值（如字符串）跳过
+		var m map[string]interface{}
+		if err := json.Unmarshal(rawVal, &m); err != nil {
+			continue // 跳过 _comment 等非对象字段
+		}
+		configs[key] = m
+	}
 
 	rc.domainJSON = &domainConfigEntry{
 		modTime: mtime,
