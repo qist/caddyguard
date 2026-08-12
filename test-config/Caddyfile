@@ -1,0 +1,53 @@
+{
+	auto_https off
+
+	servers {
+		listener_wrappers {
+			proxy_protocol {
+				allow 127.0.0.0/8
+				allow ::1/128
+				fallback_policy ignore
+			}
+			tls
+		}
+	}
+
+	layer4 {
+		:443 {
+			# SNI: sub.wyfc.qzz.io -> 127.0.0.1:8443 (caddyguard WAF)
+			@sub_wyfc tls sni sub.wyfc.qzz.io
+			route @sub_wyfc {
+				proxy 127.0.0.1:8443
+			}
+			# fallback -> 127.0.0.1:18443 (corefusion 其它业务)
+			route {
+				proxy 127.0.0.1:18443
+				proxy_protocol
+			}
+		}
+	}
+}
+
+# sub.wyfc.qzz.io - HTTPS with caddyguard WAF -> 8081
+sub.wyfc.qzz.io:8443 {
+	tls /opt/corefusion/data/certs/gg/cert.pem /opt/corefusion/data/certs/gg/key.pem
+
+	log {
+		output stdout
+		format json
+	}
+
+	route {
+		# caddyguard WAF
+		caddyguard {
+			rule_dir /opt/caddyguard/rule-config
+		}
+
+		reverse_proxy {
+			to 127.0.0.1:8081
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+}

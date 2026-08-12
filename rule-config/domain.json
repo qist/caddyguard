@@ -1,0 +1,16 @@
+{
+    "_comment": "域名级配置覆盖",
+    "www.tycng.com": {
+        "waf_enable": "on",
+        "waf_mode": "block",
+        "cc_rate": 120,
+        "cc_window": 60
+    },
+    "sub.wyfc.qzz.io": {
+        "waf_enable": "on",
+        "waf_mode": "block",
+        "post_enable": "off",
+        "cc_rate": 500,
+        "cc_window": 60
+    }
+}
