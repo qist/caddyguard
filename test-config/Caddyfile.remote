@@ -1,6 +1,11 @@
 {
 	auto_https off
 
+	# caddyguard 全局配置（只写一次，所有站点自动生效）
+	caddyguard {
+		rule_dir /opt/caddyguard/rule-config
+	}
+
 	servers {
 		listener_wrappers {
 			proxy_protocol {
@@ -31,6 +36,7 @@
 	}
 }
 
+# 站点：无需 caddyguard 配置，全局自动生效
 waf.wyfc.qzz.io:8443 {
 	tls /opt/caddyguard/certs/cert.pem /opt/caddyguard/certs/key.pem
 
@@ -39,15 +45,9 @@ waf.wyfc.qzz.io:8443 {
 		format json
 	}
 
-	route {
-		caddyguard {
-			rule_dir /opt/caddyguard/rule-config
-		}
-
-		reverse_proxy 192.168.0.151:8080 {
-			header_up X-Real-IP {remote_host}
-			header_up X-Forwarded-For {remote_host}
-			header_up X-Forwarded-Proto {scheme}
-		}
+	reverse_proxy 192.168.0.151:8080 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
 	}
 }

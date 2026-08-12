@@ -1,6 +1,11 @@
 {
 	auto_https off
 
+	# caddyguard 全局配置（只写一次，所有站点自动生效）
+	caddyguard {
+		rule_dir /opt/caddyguard/rule-config
+	}
+
 	servers {
 		listener_wrappers {
 			proxy_protocol {
@@ -31,7 +36,7 @@
 	}
 }
 
-# sub.wyfc.qzz.io - HTTPS with caddyguard WAF -> 8081
+# sub.wyfc.qzz.io - HTTPS (caddyguard 全局自动生效，无需站点级配置)
 sub.wyfc.qzz.io:8443 {
 	tls /opt/corefusion/data/certs/gg/cert.pem /opt/corefusion/data/certs/gg/key.pem
 
@@ -40,17 +45,10 @@ sub.wyfc.qzz.io:8443 {
 		format json
 	}
 
-	route {
-		# caddyguard WAF
-		caddyguard {
-			rule_dir /opt/caddyguard/rule-config
-		}
-
-		reverse_proxy {
-			to 127.0.0.1:8081
-			header_up X-Real-IP {remote_host}
-			header_up X-Forwarded-For {remote_host}
-			header_up X-Forwarded-Proto {scheme}
-		}
+	reverse_proxy {
+		to 127.0.0.1:8081
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
 	}
 }
