@@ -34,10 +34,13 @@ func resolveRuleDir(dir, baseRuleDir string) string {
 	return baseRuleDir + "/" + dir // 相对路径
 }
 
-// getClientIP 获取客户端真实 IP（对应 Lua get_client_ip）
+// getClientIP 获取客户端真实 IP
+// 当 trust_proxy_headers=on 时，优先读 header（CDN/反代场景）
+// 当 trust_proxy_headers=off 时，只用 RemoteAddr（防 IP 伪造）
+// 注意：当 layer4 使用 PROXY protocol 时，r.RemoteAddr 已是真实 IP
 func (g *Guard) getClientIP(r *http.Request, cfg Config) string {
 	if cfg.TrustProxyHeaders != "off" {
-		// 1. CF-Connecting-IP
+		// 1. CF-Connecting-IP (Cloudflare 专用，最可靠)
 		if ip := r.Header.Get("CF-Connecting-IP"); ip != "" {
 			return strings.TrimSpace(ip)
 		}
@@ -53,7 +56,7 @@ func (g *Guard) getClientIP(r *http.Request, cfg Config) string {
 			return strings.TrimSpace(xff)
 		}
 	}
-	// 4. RemoteAddr
+	// 4. RemoteAddr (PROXY protocol 会改写此值)
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
 	if host != "" {
 		return host

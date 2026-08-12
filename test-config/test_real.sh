@@ -2,12 +2,18 @@
 pkill -f "caddy run" 2>/dev/null
 sleep 1
 mkdir -p /var/log/caddyguard
+rm -f /var/log/caddyguard/*_waf.log
 
 /opt/caddy-binaries/caddy run --config /opt/caddyguard/test-config/Caddyfile --adapter caddyfile 2>/dev/null &
 CADDY_PID=$!
 sleep 3
 
+# 通过 :443 SNI 转发访问
 URL="https://sub.wyfc.qzz.io/7dd7900db90f349a39b13c8a198f4d82ce12d6a8062c89261ada0af8db3820d8"
+
+echo "========================================="
+echo "通过 :443 SNI → :8443 WAF → :8081 后端"
+echo "========================================="
 
 echo "=== 1. 正常请求 (应放行 200) ==="
 curl -sk -o /dev/null -w "HTTP %{http_code}\n" "$URL"
@@ -30,7 +36,10 @@ curl -sk -o /dev/null -w "HTTP %{http_code}\n" -d "id=1 union select 1,2,3" "$UR
 echo "=== 7. Cookie 注入 (应拦截 403) ==="
 curl -sk -o /dev/null -w "HTTP %{http_code}\n" -b "session=union select from" "$URL"
 
-echo "=== 8. 白名单 IP 8.8.8.8 (应放行 200) ==="
+echo "=== 8. Referer 检测 (应拦截 403) ==="
+curl -sk -o /dev/null -w "HTTP %{http_code}\n" -e "http://evil.pay.com/" "$URL"
+
+echo "=== 9. 白名单 IP 8.8.8.8 (应放行 200) ==="
 curl -sk -o /dev/null -w "HTTP %{http_code}\n" -H "X-Forwarded-For: 8.8.8.8" "${URL}?id=union+select"
 
 echo ""

@@ -18,6 +18,7 @@
 			@sub_wyfc tls sni sub.wyfc.qzz.io
 			route @sub_wyfc {
 				proxy 127.0.0.1:8443
+				proxy_protocol
 			}
 			# fallback -> 127.0.0.1:18443 (corefusion 其它业务)
 			route {
