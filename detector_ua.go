@@ -41,7 +41,7 @@ func (g *Guard) userAgentAttackCheck(w http.ResponseWriter, r *http.Request, cfg
 	// 黑名单 UA 检测
 	blackRules := g.ruleCache.GetRule("useragent.rule", cfg.RuleDir)
 	if matched := matchRules(ua, blackRules, true); matched != nil {
-		g.logger.Record("UserAgent", r.URL.RequestURI(), "", matched.Raw, g.getClientIP(r, cfg), r, cfg)
+		g.logger.Record("UserAgent", reqURICached(r), "", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 		g.wafOutput(w, cfg)
 		return true
 	}

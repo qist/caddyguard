@@ -1,9 +1,9 @@
 package caddyguard
 
 import (
+	"bytes"
 	"io"
 	"net/http"
-	"strings"
 )
 
 // postAttackCheck POST body 检测
@@ -32,30 +32,28 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 	maxSize := int64(10 * 1024 * 1024) // 10MB
 	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxSize))
 	r.Body.Close()
-	if err != nil {
+	if err != nil || len(bodyBytes) == 0 {
 		return false
 	}
 
-	// 恢复 body 供后续 handler 使用
-	r.Body = io.NopCloser(strings.NewReader(string(bodyBytes)))
-
-	bodyStr := string(bodyBytes)
-	if bodyStr == "" {
-		return false
-	}
+	// 恢复 body 供后续 handler 使用（用 bytes.NewReader 避免额外的 string 拷贝）
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 	rules := g.ruleCache.GetRule("post.rule", cfg.RuleDir)
 	if rules == nil {
 		return false
 	}
 
+	// 直接用 bodyBytes 进行匹配，避免 string(bodyBytes) 拷贝
+	// matchRules 需要 string 参数，这里必须转换一次
+	bodyStr := string(bodyBytes)
 	if matched := matchRules(bodyStr, rules, true); matched != nil {
 		// 截断过长的 body 用于日志
 		logBody := bodyStr
 		if len(logBody) > 1024 {
 			logBody = logBody[:1024] + "..."
 		}
-		g.logger.Record("POST", r.URL.RequestURI(), logBody, matched.Raw, g.getClientIP(r, cfg), r, cfg)
+		g.logger.Record("POST", reqURICached(r), logBody, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 		g.wafOutput(w, cfg)
 		return true
 	}

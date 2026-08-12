@@ -18,9 +18,9 @@ func (g *Guard) urlAttackCheck(w http.ResponseWriter, r *http.Request, cfg Confi
 		return false
 	}
 
-	reqURI := r.URL.RequestURI()
+	reqURI := reqURICached(r)
 	if matched := matchRules(reqURI, rules, false); matched != nil {
-		g.logger.Record("URLAttack", reqURI, "", matched.Raw, g.getClientIP(r, cfg), r, cfg)
+		g.logger.Record("URLAttack", reqURI, "", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 		g.wafOutput(w, cfg)
 		return true
 	}
@@ -47,7 +47,7 @@ func (g *Guard) urlArgsAttackCheck(w http.ResponseWriter, r *http.Request, cfg C
 			decoded = val
 		}
 		if matched := matchRules(decoded, rules, false); matched != nil {
-			g.logger.Record("URLArgs", r.URL.RequestURI(), val, matched.Raw, g.getClientIP(r, cfg), r, cfg)
+			g.logger.Record("URLArgs", reqURICached(r), val, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 			g.wafOutput(w, cfg)
 			return true
 		}
@@ -62,7 +62,7 @@ func (g *Guard) whiteURLCheck(r *http.Request, cfg Config) bool {
 		return false
 	}
 	rules := g.ruleCache.GetRule("whiteurl.rule", cfg.RuleDir)
-	reqURI := r.URL.RequestURI()
+	reqURI := reqURICached(r)
 	if matched := matchRules(reqURI, rules, false); matched != nil {
 		return true
 	}

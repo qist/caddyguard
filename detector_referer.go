@@ -22,7 +22,7 @@ func (g *Guard) refererCheck(w http.ResponseWriter, r *http.Request, cfg Config)
 	}
 
 	if matched := matchRules(referer, rules, true); matched != nil {
-		g.logger.Record("Referer", r.URL.RequestURI(), referer, matched.Raw, g.getClientIP(r, cfg), r, cfg)
+		g.logger.Record("Referer", reqURICached(r), referer, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 		g.wafOutput(w, cfg)
 		return true
 	}

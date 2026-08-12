@@ -2,9 +2,9 @@ package caddyguard
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -13,6 +13,11 @@ type WAFLogger struct {
 	logDir string
 	queue  chan LogEntry // 日志队列（有缓冲 channel）
 	done   chan struct{} // 关闭信号
+
+	// 文件句柄缓存（worker 独占，无需额外锁）
+	file     *os.File
+	fileDate string // 当前文件日期 YYYY-MM-DD
+	fileSize int64  // 当前文件大小
 }
 
 // LogEntry JSON 日志条目
@@ -41,10 +46,12 @@ func NewWAFLogger(logDir string) *WAFLogger {
 
 // Record 投递日志到队列（非阻塞）
 func (l *WAFLogger) Record(method, reqURL, reqData, ruleTag, clientIP string, r *http.Request, cfg Config) {
+	// time.Now() 只调用一次
+	now := time.Now()
 	entry := LogEntry{
-		Timestamp:    time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+		Timestamp:    now.UTC().Format("2006-01-02T15:04:05Z"),
 		ClientIP:     clientIP,
-		LocalTime:    time.Now().Format("2006-01-02 15:04:05"),
+		LocalTime:    now.Format("2006-01-02 15:04:05"),
 		ServerName:   getDomain(r),
 		UserAgent:    r.UserAgent(),
 		AttackMethod: method,
@@ -74,6 +81,7 @@ func (l *WAFLogger) worker() {
 				case entry := <-l.queue:
 					l.write(entry)
 				default:
+					l.closeFile()
 					return
 				}
 			}
@@ -82,26 +90,50 @@ func (l *WAFLogger) worker() {
 }
 
 // write 写入单条日志
+// 复用文件句柄，仅在日期变化或文件轮转时重新打开
 func (l *WAFLogger) write(entry LogEntry) {
-	logFile := fmt.Sprintf("%s/%s_waf.log", l.logDir, time.Now().Format("2006-01-02"))
+	now := time.Now()
+	dateStr := now.Format("2006-01-02")
 
-	// 日志轮转：超过 100MB 则重命名
-	if info, err := os.Stat(logFile); err == nil {
-		if info.Size() > 100*1024*1024 {
-			os.Rename(logFile, logFile+".old")
+	// 日期变化 → 关闭旧文件，打开新文件
+	if l.fileDate != dateStr {
+		l.closeFile()
+		l.fileDate = dateStr
+		l.fileSize = 0
+	}
+
+	// 文件未打开 → 打开（或轮转后重新打开）
+	if l.file == nil {
+		logPath := filepath.Join(l.logDir, dateStr+"_waf.log")
+		// 检查文件是否已存在并获取大小
+		if info, err := os.Stat(logPath); err == nil {
+			l.fileSize = info.Size()
 		}
+		// 轮转：超过 100MB 则重命名
+		if l.fileSize > 100*1024*1024 {
+			os.Rename(logPath, logPath+".old")
+			l.fileSize = 0
+		}
+		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return
+		}
+		l.file = f
 	}
 
-	// 追加写入
-	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
+	// 写入
 	jsonBytes, _ := json.Marshal(entry)
-	f.Write(jsonBytes)
-	f.WriteString("\n")
+	jsonBytes = append(jsonBytes, '\n')
+	n, _ := l.file.Write(jsonBytes)
+	l.fileSize += int64(n)
+}
+
+// closeFile 关闭当前文件句柄
+func (l *WAFLogger) closeFile() {
+	if l.file != nil {
+		l.file.Close()
+		l.file = nil
+	}
 }
 
 // Close 关闭日志器（优雅退出）

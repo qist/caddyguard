@@ -6,8 +6,13 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// hotReloadInterval 热加载检查间隔
+// 在此间隔内复用缓存结果，避免每个请求都 os.Stat
+const hotReloadInterval = 2 * time.Second
 
 // RuleCache 规则缓存：管理所有规则文件、config.json、domain.json 的 mtime 缓存
 type RuleCache struct {
@@ -16,28 +21,33 @@ type RuleCache struct {
 	files        map[string]*ruleFileEntry // key: filepath
 	domainJSON   *domainConfigEntry
 	globalConfig *globalConfigEntry // config.json 缓存
+
+	// 热加载节流：上次检查 mtime 的时间
+	lastCheckNano int64 // atomic，上次 os.Stat 的时间戳（纳秒）
 }
 
 // ruleFileEntry 存储预编译后的规则
 type ruleFileEntry struct {
-	modTime int64        // Unix mtime (秒)
-	mtime   time.Time    // 文件修改时间
-	rules   []RuleEntry  // 预编译后的规则列表
-	exists  bool         // 文件是否存在
+	modTime int64       // Unix mtime (秒)
+	rules   []RuleEntry // 预编译后的规则列表
+	exists  bool        // 文件是否存在
+	// 热加载节流：上次检查此文件 mtime 的时间
+	lastCheckNano int64 // atomic
 }
 
 // domainConfigEntry domain.json 缓存条目
 type domainConfigEntry struct {
-	modTime int64
-	mtime   time.Time
-	config  map[string]map[string]interface{}
-	raw     []byte
+	modTime       int64
+	config        map[string]map[string]interface{}
+	raw           []byte
+	lastCheckNano int64 // atomic
 }
 
 // globalConfigEntry config.json 缓存条目
 type globalConfigEntry struct {
-	modTime int64
-	config  Config
+	modTime       int64
+	config        Config
+	lastCheckNano int64 // atomic
 }
 
 // NewRuleCache 创建规则缓存
@@ -55,6 +65,13 @@ func getFileMtime(filepath string) (int64, bool) {
 		return 0, false
 	}
 	return info.ModTime().Unix(), true
+}
+
+// shouldCheck 判断是否需要重新检查 mtime（节流）
+// 在 hotReloadInterval 内不重复检查
+func shouldCheck(lastCheckNano int64) bool {
+	now := time.Now().UnixNano()
+	return now-lastCheckNano > int64(hotReloadInterval)
 }
 
 // GetRule 获取预编译规则列表（带缓存）
@@ -79,18 +96,31 @@ func (rc *RuleCache) GetRule(filename string, domainRuleDir string) []RuleEntry 
 
 // loadCached 带缓存的文件读取
 // 缓存策略：比较 mtime，mtime 未变则用缓存
+// 热加载节流：在 hotReloadInterval 内跳过 os.Stat，直接用缓存
 func (rc *RuleCache) loadCached(filepath string) ([]RuleEntry, bool) {
+	// 快速路径：先读锁检查缓存是否可用（跳过 os.Stat）
+	rc.mu.RLock()
+	entry, ok := rc.files[filepath]
+	rc.mu.RUnlock()
+
+	if ok {
+		// 检查是否在节流窗口内
+		if !shouldCheck(atomic.LoadInt64(&entry.lastCheckNano)) {
+			// 节流窗口内，直接用缓存
+			return entry.rules, entry.exists
+		}
+	}
+
+	// 需要检查 mtime
 	mtime, exists := getFileMtime(filepath)
 	if !exists {
 		return nil, false
 	}
 
-	rc.mu.RLock()
-	entry, ok := rc.files[filepath]
-	rc.mu.RUnlock()
-
-	// 缓存命中
+	// 缓存命中（mtime 未变）
 	if ok && entry.modTime == mtime {
+		// 更新最后检查时间
+		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
 		return entry.rules, true
 	}
 
@@ -100,6 +130,7 @@ func (rc *RuleCache) loadCached(filepath string) ([]RuleEntry, bool) {
 
 	// double check
 	if entry, ok := rc.files[filepath]; ok && entry.modTime == mtime {
+		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
 		return entry.rules, true
 	}
 
@@ -110,10 +141,12 @@ func (rc *RuleCache) loadCached(filepath string) ([]RuleEntry, bool) {
 	}
 
 	rules := parseAndCompileRules(string(content))
+	nowNano := time.Now().UnixNano()
 	rc.files[filepath] = &ruleFileEntry{
-		modTime: mtime,
-		rules:   rules,
-		exists:  true,
+		modTime:       mtime,
+		rules:         rules,
+		exists:        true,
+		lastCheckNano: nowNano,
 	}
 	return rules, true
 }
@@ -150,16 +183,25 @@ func compileRegex(pattern string) (*regexp.Regexp, error) {
 // 等价于 Lua 版读取 config.lua 的逻辑
 func (rc *RuleCache) GetGlobalConfig() Config {
 	path := rc.ruleDir + "/config.json"
+
+	// 快速路径：节流窗口内直接用缓存
+	rc.mu.RLock()
+	entry := rc.globalConfig
+	rc.mu.RUnlock()
+
+	if entry != nil && !shouldCheck(atomic.LoadInt64(&entry.lastCheckNano)) {
+		return entry.config
+	}
+
+	// 需要检查 mtime
 	mtime, exists := getFileMtime(path)
 	if !exists {
 		return DefaultConfig() // 文件不存在，用默认值
 	}
 
-	rc.mu.RLock()
-	entry := rc.globalConfig
-	rc.mu.RUnlock()
-
 	if entry != nil && entry.modTime == mtime {
+		// mtime 未变，更新检查时间
+		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
 		return entry.config // 缓存命中
 	}
 
@@ -169,6 +211,7 @@ func (rc *RuleCache) GetGlobalConfig() Config {
 
 	// double check
 	if entry := rc.globalConfig; entry != nil && entry.modTime == mtime {
+		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
 		return entry.config
 	}
 
@@ -183,8 +226,9 @@ func (rc *RuleCache) GetGlobalConfig() Config {
 	}
 
 	rc.globalConfig = &globalConfigEntry{
-		modTime: mtime,
-		config:  cfg,
+		modTime:       mtime,
+		config:        cfg,
+		lastCheckNano: time.Now().UnixNano(),
 	}
 	return cfg
 }
@@ -192,16 +236,24 @@ func (rc *RuleCache) GetGlobalConfig() Config {
 // GetDomainConfig 获取域名级配置（带 mtime 热加载缓存）
 func (rc *RuleCache) GetDomainConfig(domain string) map[string]map[string]interface{} {
 	path := rc.ruleDir + "/domain.json"
+
+	// 快速路径：节流窗口内直接用缓存
+	rc.mu.RLock()
+	entry := rc.domainJSON
+	rc.mu.RUnlock()
+
+	if entry != nil && !shouldCheck(atomic.LoadInt64(&entry.lastCheckNano)) {
+		return entry.config
+	}
+
+	// 需要检查 mtime
 	mtime, exists := getFileMtime(path)
 	if !exists {
 		return nil
 	}
 
-	rc.mu.RLock()
-	entry := rc.domainJSON
-	rc.mu.RUnlock()
-
 	if entry != nil && entry.modTime == mtime {
+		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
 		return entry.config
 	}
 
@@ -210,6 +262,7 @@ func (rc *RuleCache) GetDomainConfig(domain string) map[string]map[string]interf
 	defer rc.mu.Unlock()
 
 	if entry != nil && entry.modTime == mtime {
+		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
 		return entry.config
 	}
 
@@ -235,9 +288,10 @@ func (rc *RuleCache) GetDomainConfig(domain string) map[string]map[string]interf
 	}
 
 	rc.domainJSON = &domainConfigEntry{
-		modTime: mtime,
-		config:  configs,
-		raw:     content,
+		modTime:       mtime,
+		config:        configs,
+		raw:           content,
+		lastCheckNano: time.Now().UnixNano(),
 	}
 	return configs
 }

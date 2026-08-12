@@ -22,7 +22,7 @@ func (g *Guard) cookieAttackCheck(w http.ResponseWriter, r *http.Request, cfg Co
 	}
 
 	if matched := matchRules(cookieHeader, rules, true); matched != nil {
-		g.logger.Record("Cookie", r.URL.RequestURI(), cookieHeader, matched.Raw, g.getClientIP(r, cfg), r, cfg)
+		g.logger.Record("Cookie", reqURICached(r), cookieHeader, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 		g.wafOutput(w, cfg)
 		return true
 	}
@@ -30,7 +30,7 @@ func (g *Guard) cookieAttackCheck(w http.ResponseWriter, r *http.Request, cfg Co
 	// 逐个 cookie 值检测
 	for _, cookie := range r.Cookies() {
 		if matched := matchRules(cookie.Value, rules, true); matched != nil {
-			g.logger.Record("Cookie", r.URL.RequestURI(), cookie.Value, matched.Raw, g.getClientIP(r, cfg), r, cfg)
+			g.logger.Record("Cookie", reqURICached(r), cookie.Value, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 			g.wafOutput(w, cfg)
 			return true
 		}

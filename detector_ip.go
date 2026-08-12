@@ -10,7 +10,7 @@ func (g *Guard) whiteIPCheck(r *http.Request, cfg Config) bool {
 	if cfg.WhiteIPCheck != "on" {
 		return false
 	}
-	clientIP := g.getClientIP(r, cfg)
+	clientIP := g.getClientIPCached(r, cfg)
 	rules := g.ruleCache.GetRule("whiteip.rule", cfg.RuleDir)
 	// IP 规则使用 glob 格式，运行时编译
 	for _, rule := range rules {
@@ -27,11 +27,11 @@ func (g *Guard) blackIPCheck(w http.ResponseWriter, r *http.Request, cfg Config)
 	if cfg.BlackIPCheck != "on" {
 		return false
 	}
-	clientIP := g.getClientIP(r, cfg)
+	clientIP := g.getClientIPCached(r, cfg)
 	rules := g.ruleCache.GetRule("blackip.rule", cfg.RuleDir)
 	for _, rule := range rules {
 		if matchRegex(clientIP, globToRegex(rule.Raw), false) {
-			g.logger.Record("BlackIP", r.URL.RequestURI(), "", rule.Raw, clientIP, r, cfg)
+			g.logger.Record("BlackIP", reqURICached(r), "", rule.Raw, clientIP, r, cfg)
 			g.wafOutput(w, cfg)
 			return true
 		}
@@ -45,9 +45,9 @@ func (g *Guard) dynamicBlackIPCheck(w http.ResponseWriter, r *http.Request, cfg 
 	if cfg.CCBlockTTL <= 0 {
 		return false
 	}
-	clientIP := g.getClientIP(r, cfg)
+	clientIP := g.getClientIPCached(r, cfg)
 	if g.ccStore.IsBanned(clientIP) {
-		g.logger.Record("DynamicBlackIP", r.URL.RequestURI(), "", "CC Ban", clientIP, r, cfg)
+		g.logger.Record("DynamicBlackIP", reqURICached(r), "", "CC Ban", clientIP, r, cfg)
 		g.wafOutput(w, cfg)
 		return true
 	}

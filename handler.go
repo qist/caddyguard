@@ -58,6 +58,9 @@ func (g *Guard) runChecks(w http.ResponseWriter, r *http.Request, cfg Config) bo
 	return false
 }
 
+// defaultHTMLBytes 预计算 []byte，避免每次 wafOutput 时重新分配
+var defaultHTMLBytes = []byte(defaultHTML)
+
 // wafOutput 输出拦截响应
 // waf_output: "html" → 返回拦截页面，"redirect" → 302 跳转
 func (g *Guard) wafOutput(w http.ResponseWriter, cfg Config) {
@@ -68,7 +71,7 @@ func (g *Guard) wafOutput(w http.ResponseWriter, cfg Config) {
 	// 默认 html
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusForbidden)
-	w.Write([]byte(defaultHTML))
+	w.Write(defaultHTMLBytes)
 }
 
 const defaultHTML = `<html>

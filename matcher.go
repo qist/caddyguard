@@ -39,7 +39,8 @@ func matchRules(input string, rules []RuleEntry, caseInsensitive bool) *RuleEntr
 // regexCache 用于运行时动态编译的正则缓存（IP glob 等）
 var regexCache sync.Map // key: pattern → value: *regexp.Regexp
 
-// matchRegex 单条正则匹配（用于 IP glob 等动态规则）
+// matchRegex 单条正则匹配（用于 IP glob 等）
+// caseInsensitive 参数保留用于接口兼容，当前 IP 匹配场景固定 false
 func matchRegex(text, pattern string, caseInsensitive bool) bool {
 	if pattern == "" || text == "" {
 		return false
@@ -65,6 +66,10 @@ func matchRegex(text, pattern string, caseInsensitive bool) bool {
 	return re.MatchString(text)
 }
 
+// globEscapeRe 预编译的正则，用于 globToRegex 中转义特殊字符
+// 避免每次调用 globToRegex 都重新编译这个正则
+var globEscapeRe = regexp.MustCompile(`([.+?[\](){}$^])`)
+
 // globToRegex 将 glob 通配符转为正则
 // 192.168.0.* → ^192\.168\.0\.\d+$
 // 192.168.*.1 → ^192\.168\.\d+\.1$
@@ -73,8 +78,8 @@ func globToRegex(pattern string) string {
 	if !strings.Contains(pattern, "*") {
 		return pattern // 已是正则
 	}
-	// 转义特殊字符（除 *）
-	regex := regexp.MustCompile(`([.+?[\](){}$^])`).ReplaceAllStringFunc(pattern, func(s string) string {
+	// 转义特殊字符（除 *），使用预编译正则避免每次 MustCompile
+	regex := globEscapeRe.ReplaceAllStringFunc(pattern, func(s string) string {
 		return "\\" + s
 	})
 	// * → \d+
