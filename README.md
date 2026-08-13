@@ -4,8 +4,9 @@ Caddy v2 WAF (Web Application Firewall) 插件 — 用 Go 原生编写，为 Cad
 
 ## 特性
 
+- **全局自动生效**：全局配置一次 `rule_dir`，所有站点自动启用 WAF，无需每个站点单独写 `caddyguard` 指令（通过 `caddyguardfile` 适配器实现）
 - **12 项检测链**：白名单 IP/URL/UA、黑名单 IP、CC 攻击防护、URL 路径/参数检测、User-Agent/Cookie/Referer 检测、POST body 检测、文件上传扩展名检测
-- **高性能**：正则预编译 + 64 分片 CC 存储 + Config 预合并缓存，WAF 开启仅 ~7% 性能开销
+- **高性能**：正则预编译（含 `(?i)` 大小写不敏感版本）+ 64 分片 CC 存储 + Config 预合并缓存，WAF 开启仅 ~7% 性能开销
 - **热加载**：规则和配置文件修改后 2 秒内自动生效，无需重启 Caddy
 - **域名级配置**：支持全局配置 + 按域名覆盖（精确匹配 + 通配符）+ 域名级独立规则目录
 - **零 reflect/unsafe**：使用 Caddy 标准中间件链，不依赖私有字段反射
@@ -33,7 +34,9 @@ xcaddy build --with github.com/qist/caddyguard=. --output ./caddy
 ./caddy version
 ./caddy list-modules | grep caddyguard
 # 输出:
-#   http.handlers.caddyguard
+#   caddy.adapters.caddyguardfile   # 适配器（全局自动注入）
+#   caddyguard                       # App 模块（全局配置存储）
+#   http.handlers.caddyguard         # WAF handler
 ```
 
 ### 交叉编译
@@ -45,29 +48,46 @@ CGO_ENABLED=0 xcaddy build --with github.com/qist/caddyguard --output ./caddy-li
 
 ## 配置
 
-### Caddyfile 全局配置
+CaddyGuard 提供两种配置方式：
+
+### 方式 1：全局配置 + `caddyguardfile` 适配器（推荐）
+
+全局配置一次 `rule_dir`，所有站点自动启用 WAF，**站点块不需要写 `caddyguard`**。
+`caddyguardfile` 适配器在解析 Caddyfile 后自动向每个 HTTP server 注入 Guard handler。
 
 ```caddyfile
 {
     auto_https off
 
-    # 全局 WAF 配置
+    # 全局 WAF 配置 — 只写一次
     caddyguard {
         rule_dir /etc/caddyguard/rule-config
     }
 }
 
+# 站点不需要写 caddyguard，自动生效
 example.com {
     reverse_proxy 127.0.0.1:8080
 }
+
+another.com {
+    reverse_proxy 127.0.0.1:9090
+}
 ```
 
-### Caddyfile 站点级配置
+启动时使用 `--adapter caddyguardfile`：
+
+```bash
+caddy run --config /etc/caddy/Caddyfile --adapter caddyguardfile
+```
+
+### 方式 2：站点级配置 + 标准 `caddyfile` 适配器
+
+每个站点单独写 `caddyguard` 指令，适合需要精细控制的场景。
 
 ```caddyfile
 {
     auto_https off
-    order caddyguard before reverse_proxy
 }
 
 example.com {
@@ -77,6 +97,22 @@ example.com {
     reverse_proxy 127.0.0.1:8080
 }
 ```
+
+启动时使用标准 `caddyfile` 适配器（默认）：
+
+```bash
+caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+```
+
+### 两种方式对比
+
+| | 方式 1：caddyguardfile | 方式 2：caddyfile |
+|---|---|---|
+| 全局配置 | ✅ 一次配置，所有站点自动生效 | ❌ 每个站点需单独写 |
+| 站点块 | 只写业务指令 | 需写 `caddyguard` 指令 |
+| 启动参数 | `--adapter caddyguardfile` | `--adapter caddyfile`（默认） |
+| 站点级覆盖 | 支持（站点写 `caddyguard { rule_dir ... }`） | 支持 |
+| 推荐场景 | 多站点统一 WAF | 单站点或精细控制 |
 
 ### 规则目录结构
 
@@ -361,14 +397,14 @@ cp caddy /usr/local/bin/
 mkdir -p /etc/caddyguard/rule-config
 cp -r rule-config/* /etc/caddyguard/rule-config/
 
-# systemd 服务
+# systemd 服务（使用 caddyguardfile 适配器，全局自动生效）
 cat > /etc/systemd/system/caddy.service << 'EOF'
 [Unit]
 Description=Caddy with CaddyGuard WAF
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyguardfile
 Restart=always
 RestartSec=3
 
@@ -418,11 +454,13 @@ caddyguard/
 ├── config.go              # Config 结构体定义
 ├── domain.go              # 域名级配置查找（预合并缓存）
 ├── rules.go               # 规则缓存 + 热加载 + 配置预合并
-├── matcher.go             # 正则匹配引擎（预编译 + ToLower 优化）
+├── adapter.go             # caddyguardfile 适配器（全局自动注入 Guard handler）
+├── matcher.go             # 正则匹配引擎（预编译 + (?i) 大小写不敏感）
 ├── storage.go             # CC 存储（64 分片 + 滑动窗口 + 内存上限）
 ├── logger.go              # 异步日志（buffered channel + worker）
 ├── request_context.go     # 请求上下文缓存（clientIP, URI）
 ├── detector_*.go          # 各检测器实现
+├── module_test.go         # 适配器单元测试
 ├── bench_test.go          # Go benchmark 测试
 ├── rule-config/           # 规则配置文件
 │   ├── config.json        # 全局 WAF 配置
