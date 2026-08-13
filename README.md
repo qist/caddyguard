@@ -22,7 +22,10 @@ Caddy v2 WAF (Web Application Firewall) 插件 — 用 Go 原生编写，为 Cad
 # 安装 xcaddy
 go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
 
-# 编译带 CaddyGuard 的 Caddy 二进制
+# 方式 1：直接从 GitHub 仓库编译（推荐）
+xcaddy build --with github.com/qist/caddyguard --output ./caddy
+
+# 方式 2：本地开发编译
 cd /opt/caddyguard
 xcaddy build --with github.com/qist/caddyguard=. --output ./caddy
 
@@ -30,7 +33,6 @@ xcaddy build --with github.com/qist/caddyguard=. --output ./caddy
 ./caddy version
 ./caddy list-modules | grep caddyguard
 # 输出:
-#   caddyguard
 #   http.handlers.caddyguard
 ```
 
@@ -38,7 +40,7 @@ xcaddy build --with github.com/qist/caddyguard=. --output ./caddy
 
 ```bash
 # Linux AMD64
-CGO_ENABLED=0 xcaddy build --with github.com/qist/caddyguard=. --output ./caddy-linux-amd64
+CGO_ENABLED=0 xcaddy build --with github.com/qist/caddyguard --output ./caddy-linux-amd64
 ```
 
 ## 配置
@@ -211,16 +213,15 @@ CaddyGuard 支持规则和配置的热加载：
 
 ### 压测对比
 
-| 场景 | req/s | 平均延迟 | P99 | 开销 |
-|------|-------|---------|-----|------|
-| Caddy + reverse_proxy（无 WAF） | 13,370 | 15.0ms | 29ms | 基准 |
-| CaddyGuard 规则全关 | 6,405 | 31.2ms | 74ms | ~0% |
-| CaddyGuard 规则全开（不含 CC） | 5,876 | 34.0ms | 75ms | ~8% |
-| CaddyGuard + CC | 5,971 | 33.5ms | 77ms | ~8% |
-| CaddyGuard + 日志（攻击请求） | 10,660 | 18.8ms | 24ms | -20%* |
-| CaddyGuard + POST body | 4,922 | 40.6ms | 92ms | ~16% |
+| 场景 | req/s | CPU | RSS | P99 | 开销 |
+|------|-------|-----|-----|-----|------|
+| Caddy + reverse_proxy（无 WAF） | 6,372 | 140% | 70 MB | 69ms | 基准 |
+| CaddyGuard 规则全关 | 6,454 | 168% | 72 MB | 68ms | ~0% |
+| CaddyGuard 规则全开（不含 CC） | 5,954 | 178% | 79 MB | 74ms | ~7% |
+| CaddyGuard + CC | 5,936 | 179% | 76 MB | 75ms | ~7% |
+| CaddyGuard + POST body | 5,092 | 198% | 77 MB | 92ms | ~20% |
 
-> *攻击请求被 WAF 直接拦截返回 403，不走后端 reverse_proxy，反而更快。
+> CPU 为压测期间 pidstat 采样的平均值（4 核机器，>100% 表示多核占用）。RSS 为压测期间峰值内存。
 
 ### Go Benchmark 微基准
 
@@ -284,7 +285,7 @@ systemctl enable --now caddy
 
 ```dockerfile
 FROM caddy:2-builder AS builder
-RUN xcaddy build --with github.com/qist/caddyguard=.
+RUN xcaddy build --with github.com/qist/caddyguard
 
 FROM caddy:2
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
