@@ -14,23 +14,21 @@ type RuleEntry struct {
 
 // matchRules 将输入与预编译规则列表逐一匹配
 // 返回命中的规则（用于日志记录）
+// 优化：caseInsensitive 时 strings.ToLower 只做一次，而非每条规则一次
 func matchRules(input string, rules []RuleEntry, caseInsensitive bool) *RuleEntry {
 	if input == "" || len(rules) == 0 {
 		return nil
 	}
 
+	// 大小写不敏感：ToLower 只做一次，循环内直接用
+	normalized := input
+	if caseInsensitive {
+		normalized = strings.ToLower(input)
+	}
+
 	for i := range rules {
-		re := rules[i].Regex
-		if caseInsensitive {
-			// 预编译时已编译为大小写敏感
-			// 此处通过 ToLower 优化，避免运行时重新编译
-			if re.MatchString(strings.ToLower(input)) {
-				return &rules[i]
-			}
-		} else {
-			if re.MatchString(input) {
-				return &rules[i]
-			}
+		if rules[i].Regex.MatchString(normalized) {
+			return &rules[i]
 		}
 	}
 	return nil

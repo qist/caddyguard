@@ -1,0 +1,14 @@
+{
+	auto_https off
+
+	# 站点级 caddyguard 指令需要排序
+	order caddyguard before respond
+}
+
+# 压测站点：caddyguard 中间件 + respond 后端
+:8888 {
+	caddyguard {
+		rule_dir /opt/caddyguard/rule-config
+	}
+	respond "ok" 200
+}

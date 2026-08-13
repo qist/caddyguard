@@ -38,9 +38,15 @@ type ruleFileEntry struct {
 // domainConfigEntry domain.json 缓存条目
 type domainConfigEntry struct {
 	modTime       int64
-	config        map[string]map[string]interface{}
-	raw           []byte
-	lastCheckNano int64 // atomic
+	configs       map[string]Config      // 精确域名 → 预合并后的 Config
+	wildcards     []domainWildcardEntry // 通配符域名列表（加载时预解析）
+	lastCheckNano int64                // atomic
+}
+
+// domainWildcardEntry 通配符域名配置
+type domainWildcardEntry struct {
+	suffix string // .example.com
+	config Config
 }
 
 // globalConfigEntry config.json 缓存条目
@@ -233,8 +239,9 @@ func (rc *RuleCache) GetGlobalConfig() Config {
 	return cfg
 }
 
-// GetDomainConfig 获取域名级配置（带 mtime 热加载缓存）
-func (rc *RuleCache) GetDomainConfig(domain string) map[string]map[string]interface{} {
+// GetDomainConfig 获取域名级预合并配置（带 mtime 热加载缓存）
+// 返回预合并后的结构：精确域名 map + 通配符列表，请求时只需一次 map 查找
+func (rc *RuleCache) GetDomainConfig() *domainConfigEntry {
 	path := rc.ruleDir + "/domain.json"
 
 	// 快速路径：节流窗口内直接用缓存
@@ -243,7 +250,7 @@ func (rc *RuleCache) GetDomainConfig(domain string) map[string]map[string]interf
 	rc.mu.RUnlock()
 
 	if entry != nil && !shouldCheck(atomic.LoadInt64(&entry.lastCheckNano)) {
-		return entry.config
+		return entry
 	}
 
 	// 需要检查 mtime
@@ -254,44 +261,126 @@ func (rc *RuleCache) GetDomainConfig(domain string) map[string]map[string]interf
 
 	if entry != nil && entry.modTime == mtime {
 		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
-		return entry.config
+		return entry
 	}
 
-	// 重新加载
-	rc.mu.Lock()
-	defer rc.mu.Unlock()
-
-	if entry != nil && entry.modTime == mtime {
-		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
-		return entry.config
-	}
-
+	// ⚠️ 文件读取和 GetGlobalConfig 必须在写锁外执行
+	// 否则 GetGlobalConfig 的 RLock 会与 GetDomainConfig 的 Lock 自死锁
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
 
-	// 先解析为 RawMessage，跳过非对象值（如 _comment 字符串）
 	var rawConfigs map[string]json.RawMessage
 	if err := json.Unmarshal(content, &rawConfigs); err != nil {
 		return nil
 	}
 
-	configs := make(map[string]map[string]interface{})
+	// 获取全局基线配置用于合并（在写锁外调用，避免自死锁）
+	globalCfg := rc.GetGlobalConfig()
+
+	configs := make(map[string]Config)
+	var wildcards []domainWildcardEntry
+
 	for key, rawVal := range rawConfigs {
-		// 尝试解析为 map[string]interface{}，非对象值（如字符串）跳过
 		var m map[string]interface{}
 		if err := json.Unmarshal(rawVal, &m); err != nil {
 			continue // 跳过 _comment 等非对象字段
 		}
-		configs[key] = m
+		merged := mergeDomainConfig(globalCfg, m)
+		if strings.HasPrefix(key, "*.") {
+			wildcards = append(wildcards, domainWildcardEntry{
+				suffix: key[1:],
+				config: merged,
+			})
+		} else {
+			configs[key] = merged
+		}
 	}
 
-	rc.domainJSON = &domainConfigEntry{
+	// 写入缓存：只需写锁
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+
+	// double check：可能在等待锁期间已被其他 goroutine 加载
+	if entry := rc.domainJSON; entry != nil && entry.modTime == mtime {
+		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
+		return entry
+	}
+
+	newEntry := &domainConfigEntry{
 		modTime:       mtime,
-		config:        configs,
-		raw:           content,
+		configs:       configs,
+		wildcards:     wildcards,
 		lastCheckNano: time.Now().UnixNano(),
 	}
-	return configs
+	rc.domainJSON = newEntry
+	return newEntry
+}
+
+// mergeDomainConfig 将域名级 map 配置合并到全局 Config 基线上
+// 在加载阶段执行一次，请求阶段零开销
+func mergeDomainConfig(base Config, domainCfg map[string]interface{}) Config {
+	cfg := base // 以全局基线为起点
+	if v, ok := domainCfg["waf_enable"].(string); ok && v != "" {
+		cfg.WAFEnable = v
+	}
+	if v, ok := domainCfg["trust_proxy_headers"].(string); ok && v != "" {
+		cfg.TrustProxyHeaders = v
+	}
+	if v, ok := domainCfg["log_dir"].(string); ok && v != "" {
+		cfg.LogDir = v
+	}
+	if v, ok := domainCfg["rule_dir"].(string); ok && v != "" {
+		cfg.RuleDir = v
+	}
+	if v, ok := domainCfg["white_url_check"].(string); ok && v != "" {
+		cfg.WhiteURLCheck = v
+	}
+	if v, ok := domainCfg["white_ip_check"].(string); ok && v != "" {
+		cfg.WhiteIPCheck = v
+	}
+	if v, ok := domainCfg["white_ua_check"].(string); ok && v != "" {
+		cfg.WhiteUACheck = v
+	}
+	if v, ok := domainCfg["black_ip_check"].(string); ok && v != "" {
+		cfg.BlackIPCheck = v
+	}
+	if v, ok := domainCfg["url_check"].(string); ok && v != "" {
+		cfg.URLCheck = v
+	}
+	if v, ok := domainCfg["url_args_check"].(string); ok && v != "" {
+		cfg.URLArgsCheck = v
+	}
+	if v, ok := domainCfg["user_agent_check"].(string); ok && v != "" {
+		cfg.UserAgentCheck = v
+	}
+	if v, ok := domainCfg["cookie_check"].(string); ok && v != "" {
+		cfg.CookieCheck = v
+	}
+	if v, ok := domainCfg["cc_check"].(string); ok && v != "" {
+		cfg.CCCheck = v
+	}
+	if v, ok := domainCfg["cc_rate"].(string); ok && v != "" {
+		cfg.CCRate = v
+	}
+	if v, ok := domainCfg["cc_block_ttl"].(float64); ok && v > 0 {
+		cfg.CCBlockTTL = int(v)
+	}
+	if v, ok := domainCfg["post_check"].(string); ok && v != "" {
+		cfg.PostCheck = v
+	}
+	if v, ok := domainCfg["referer_check"].(string); ok && v != "" {
+		cfg.RefererCheck = v
+	}
+	if v, ok := domainCfg["file_upload_check"].(string); ok && v != "" {
+		cfg.FileUploadCheck = v
+	}
+	if v, ok := domainCfg["waf_output"].(string); ok && v != "" {
+		cfg.WAFOutput = v
+	}
+	if v, ok := domainCfg["waf_redirect_url"].(string); ok && v != "" {
+		cfg.WAFRedirectURL = v
+	}
+	return cfg
 }

@@ -1,0 +1,21 @@
+{
+    "waf_enable": "on",
+    "trust_proxy_headers": "on",
+    "log_dir": "/var/log/caddyguard",
+    "url_check": "on",
+    "url_args_check": "on",
+    "post_check": "on",
+    "user_agent_check": "on",
+    "cookie_check": "on",
+    "cc_check": "off",
+    "cc_rate": "999999/60",
+    "cc_block_ttl": 0,
+    "white_ip_check": "on",
+    "white_ua_check": "on",
+    "white_url_check": "on",
+    "black_ip_check": "on",
+    "referer_check": "off",
+    "file_upload_check": "on",
+    "waf_output": "html",
+    "waf_redirect_url": "https://www.waf.com"
+}

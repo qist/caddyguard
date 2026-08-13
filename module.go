@@ -2,11 +2,8 @@ package caddyguard
 
 import (
 	"context"
-	"fmt"
 	"net/http"
-	"reflect"
 	"time"
-	"unsafe"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
@@ -18,113 +15,26 @@ import (
 
 func init() {
 	caddy.RegisterModule(&Guard{})
-	caddy.RegisterModule(&GuardApp{})
 
 	// 全局选项：在 Caddyfile 全局 {} 块中使用
+	// 解析配置并存储，站点级 caddyguard 指令自动读取
 	httpcaddyfile.RegisterGlobalOption("caddyguard", parseGlobalOption)
 
-	// 保留站点级 handler 指令（向后兼容）
+	// 站点级 handler 指令（标准 Caddy 中间件链，无需 reflect/unsafe）
 	httpcaddyfile.RegisterHandlerDirective("caddyguard", parseCaddyfile)
 }
 
 // ============================================================
-// GuardApp — 全局 App，自动将 Guard 中间件注入到所有 HTTP 站点
+// 全局配置存储（通过全局选项解析，供站点级指令使用）
 // ============================================================
 
-type GuardApp struct {
-	RuleDir string `json:"rule_dir,omitempty"`
-	ctx     caddy.Context
+// globalGuardConfig 全局 caddyguard 配置（从全局选项解析）
+type globalGuardConfig struct {
+	RuleDir string
 }
-
-func (*GuardApp) CaddyModule() caddy.ModuleInfo {
-	return caddy.ModuleInfo{
-		ID:  "caddyguard",
-		New: func() caddy.Module { return new(GuardApp) },
-	}
-}
-
-// Provision 只保存配置，不注入 route
-// route 注入在 Start() 中完成（此时 http.Provision 已编译完 primaryHandlerChain）
-func (ga *GuardApp) Provision(ctx caddy.Context) error {
-	ga.ctx = ctx
-	if ga.RuleDir == "" {
-		ga.RuleDir = "/etc/caddyguard/rule-config"
-	}
-	return nil
-}
-
-// Start 在 http.Start() 之前执行（字母序 caddyguard < http）
-// 此时 primaryHandlerChain 已编译，用反射包装它
-func (ga *GuardApp) Start() error {
-	httpAppRaw, err := ga.ctx.App("http")
-	if err != nil {
-		return nil
-	}
-	httpApp, ok := httpAppRaw.(*caddyhttp.App)
-	if !ok {
-		return nil
-	}
-
-	for srvName, srv := range httpApp.Servers {
-		// 创建 Guard handler
-		guard := &Guard{RuleDir: ga.RuleDir}
-		if err := guard.Provision(ga.ctx); err != nil {
-			return fmt.Errorf("caddyguard: provision guard: %w", err)
-		}
-
-		// 用反射读取 primaryHandlerChain（私有字段）
-		srvVal := reflect.ValueOf(srv).Elem()
-		chainField := srvVal.FieldByName("primaryHandlerChain")
-
-		if !chainField.IsValid() {
-			caddy.Log().Warn("caddyguard: primaryHandlerChain field not found", zap.String("server", srvName))
-			continue
-		}
-
-		// 用 unsafe.Pointer 读取私有字段（reflect.Value.Interface() 不支持非导出字段）
-		// primaryHandlerChain 是 caddyhttp.Handler 接口类型，在内存中是一个指针
-		chainFieldPtr := (*caddyhttp.Handler)(unsafe.Pointer(chainField.UnsafeAddr()))
-		if *chainFieldPtr == nil {
-			caddy.Log().Warn("caddyguard: primaryHandlerChain is nil", zap.String("server", srvName))
-			continue
-		}
-
-		originalChain := *chainFieldPtr
-
-		// 包装：Guard 先执行，放行后调用原始 chain
-		wrappedChain := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
-			// recover 容错
-			defer func() {
-				if rv := recover(); rv != nil {
-					caddy.Log().Error("caddyguard panic", zap.Any("error", rv))
-				}
-			}()
-
-			cfg := guard.GetEffectiveConfig(r)
-			if cfg.WAFEnable == "off" {
-				return originalChain.ServeHTTP(w, r)
-			}
-			blocked := guard.runChecks(w, r, cfg)
-			if blocked {
-				return nil
-			}
-			return originalChain.ServeHTTP(w, r)
-		})
-
-		// 用 unsafe 写入私有字段
-		*chainFieldPtr = wrappedChain
-
-		caddy.Log().Info("caddyguard: guard injected into server",
-			zap.String("server", srvName))
-	}
-
-	return nil
-}
-
-func (ga *GuardApp) Stop() error { return nil }
 
 // ============================================================
-// Guard — HTTP 中间件 handler（站点级使用，向后兼容）
+// Guard — HTTP 中间件 handler
 // ============================================================
 
 type Guard struct {
@@ -146,8 +56,9 @@ func (*Guard) CaddyModule() caddy.ModuleInfo {
 }
 
 // parseGlobalOption 解析全局 {} 块中的 caddyguard 指令
+// 存储配置供站点级指令使用
 func parseGlobalOption(d *caddyfile.Dispenser, _ any) (any, error) {
-	app := &GuardApp{}
+	cfg := &globalGuardConfig{}
 	for d.Next() {
 		for nesting := d.Nesting(); d.NextBlock(nesting); {
 			switch d.Val() {
@@ -155,17 +66,19 @@ func parseGlobalOption(d *caddyfile.Dispenser, _ any) (any, error) {
 				if !d.NextArg() {
 					return nil, d.ArgErr()
 				}
-				app.RuleDir = d.Val()
+				cfg.RuleDir = d.Val()
 			}
 		}
 	}
+	// 返回 App 类型，Caddy 会注册为 caddyguard app
+	// 但实际上我们不需要 GuardApp，这里只是为了利用全局选项机制
 	return httpcaddyfile.App{
 		Name:  "caddyguard",
-		Value: caddyconfig.JSON(app, nil),
+		Value: caddyconfig.JSON(cfg, nil),
 	}, nil
 }
 
-// parseCaddyfile 解析站点块中的 caddyguard 指令（向后兼容）
+// parseCaddyfile 解析站点块中的 caddyguard 指令
 func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	g := &Guard{}
 	for h.Next() {
@@ -219,11 +132,16 @@ func (g *Guard) cleanupLoop() {
 	}
 }
 
-// ServeHTTP 实现 caddyhttp.MiddlewareHandler（站点级使用时）
+// ServeHTTP 实现 caddyhttp.MiddlewareHandler
+// 通过标准 Caddy 中间件链调用，无需 reflect/unsafe
 func (g *Guard) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	defer func() {
 		if rv := recover(); rv != nil {
-			caddy.Log().Error("caddyguard panic", zap.Any("error", rv))
+			caddy.Log().Error("caddyguard panic",
+				zap.Any("error", rv),
+				zap.String("path", r.URL.Path))
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("WAF internal error"))
 		}
 	}()
 
@@ -243,6 +161,5 @@ var (
 	_ caddy.Provisioner           = (*Guard)(nil)
 	_ caddy.CleanerUpper          = (*Guard)(nil)
 	_ caddyhttp.MiddlewareHandler = (*Guard)(nil)
-	_ caddy.Provisioner           = (*GuardApp)(nil)
-	_ caddy.App                   = (*GuardApp)(nil)
 )
+

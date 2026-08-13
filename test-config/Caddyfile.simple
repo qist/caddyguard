@@ -1,0 +1,7 @@
+{
+	auto_https off
+}
+
+:8888 {
+	respond "ok" 200
+}
