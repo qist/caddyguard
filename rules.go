@@ -172,9 +172,12 @@ func parseAndCompileRules(content string) []RuleEntry {
 		if err != nil {
 			continue
 		}
+		// 预编译大小写不敏感版本（(?i) 前缀）
+		reCI, _ := compileRegex("(?i)" + line)
 		rules = append(rules, RuleEntry{
-			Raw:   line,
-			Regex: re,
+			Raw:     line,
+			Regex:   re,
+			RegexCI: reCI,
 		})
 	}
 	return rules

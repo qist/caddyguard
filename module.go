@@ -15,23 +15,38 @@ import (
 
 func init() {
 	caddy.RegisterModule(&Guard{})
+	caddy.RegisterModule(&GuardApp{})
 
 	// 全局选项：在 Caddyfile 全局 {} 块中使用
-	// 解析配置并存储，站点级 caddyguard 指令自动读取
+	// 存储 rule_dir，站点级 caddyguard 指令自动读取
 	httpcaddyfile.RegisterGlobalOption("caddyguard", parseGlobalOption)
 
 	// 站点级 handler 指令（标准 Caddy 中间件链，无需 reflect/unsafe）
 	httpcaddyfile.RegisterHandlerDirective("caddyguard", parseCaddyfile)
+
+	// 默认在 reverse_proxy 之前执行，用户无需手动写 order
+	httpcaddyfile.RegisterDirectiveOrder("caddyguard", "before", "reverse_proxy")
 }
 
 // ============================================================
-// 全局配置存储（通过全局选项解析，供站点级指令使用）
+// GuardApp — Caddy App 模块（全局配置存储）
 // ============================================================
 
-// globalGuardConfig 全局 caddyguard 配置（从全局选项解析）
-type globalGuardConfig struct {
-	RuleDir string
+// GuardApp 存储全局 caddyguard 配置（rule_dir）
+// 站点级 Guard handler 在 Provision 时通过 ctx.App("caddyguard") 读取
+type GuardApp struct {
+	RuleDir string `json:"rule_dir,omitempty"`
 }
+
+func (*GuardApp) CaddyModule() caddy.ModuleInfo {
+	return caddy.ModuleInfo{
+		ID:  "caddyguard",
+		New: func() caddy.Module { return new(GuardApp) },
+	}
+}
+
+func (a *GuardApp) Start() error { return nil }
+func (a *GuardApp) Stop() error  { return nil }
 
 // ============================================================
 // Guard — HTTP 中间件 handler
@@ -56,9 +71,9 @@ func (*Guard) CaddyModule() caddy.ModuleInfo {
 }
 
 // parseGlobalOption 解析全局 {} 块中的 caddyguard 指令
-// 存储配置供站点级指令使用
+// 存储配置到 GuardApp，站点只需写 caddyguard 一个词即可自动读取
 func parseGlobalOption(d *caddyfile.Dispenser, _ any) (any, error) {
-	cfg := &globalGuardConfig{}
+	cfg := &GuardApp{}
 	for d.Next() {
 		for nesting := d.Nesting(); d.NextBlock(nesting); {
 			switch d.Val() {
@@ -70,8 +85,6 @@ func parseGlobalOption(d *caddyfile.Dispenser, _ any) (any, error) {
 			}
 		}
 	}
-	// 返回 App 类型，Caddy 会注册为 caddyguard app
-	// 但实际上我们不需要 GuardApp，这里只是为了利用全局选项机制
 	return httpcaddyfile.App{
 		Name:  "caddyguard",
 		Value: caddyconfig.JSON(cfg, nil),
@@ -79,6 +92,7 @@ func parseGlobalOption(d *caddyfile.Dispenser, _ any) (any, error) {
 }
 
 // parseCaddyfile 解析站点块中的 caddyguard 指令
+// 站点只需写 caddyguard 一个词，rule_dir 自动从全局 GuardApp 获取
 func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	g := &Guard{}
 	for h.Next() {
@@ -96,6 +110,14 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 }
 
 func (g *Guard) Provision(ctx caddy.Context) error {
+	// 优先使用站点级配置，为空时从全局 GuardApp 获取
+	if g.RuleDir == "" {
+		if app, err := ctx.App("caddyguard"); err == nil {
+			if guardApp, ok := app.(*GuardApp); ok && guardApp.RuleDir != "" {
+				g.RuleDir = guardApp.RuleDir
+			}
+		}
+	}
 	if g.RuleDir == "" {
 		g.RuleDir = "/etc/caddyguard/rule-config"
 	}
@@ -161,5 +183,5 @@ var (
 	_ caddy.Provisioner           = (*Guard)(nil)
 	_ caddy.CleanerUpper          = (*Guard)(nil)
 	_ caddyhttp.MiddlewareHandler = (*Guard)(nil)
+	_ caddy.App                   = (*GuardApp)(nil)
 )
-

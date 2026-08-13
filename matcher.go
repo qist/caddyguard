@@ -8,27 +8,29 @@ import (
 
 // RuleEntry 规则条目：加载阶段预编译正则，请求阶段零编译开销
 type RuleEntry struct {
-	Raw   string         // 原始规则文本
-	Regex *regexp.Regexp // 预编译后的正则
+	Raw     string         // 原始规则文本
+	Regex   *regexp.Regexp // 预编译后的正则（大小写敏感）
+	RegexCI *regexp.Regexp // 预编译后的正则（大小写不敏感，(?i) 前缀）
 }
 
 // matchRules 将输入与预编译规则列表逐一匹配
 // 返回命中的规则（用于日志记录）
-// 优化：caseInsensitive 时 strings.ToLower 只做一次，而非每条规则一次
+// caseInsensitive=true 时使用 RegexCI（(?i) 前缀预编译），
+// 无需运行时 ToLower，真正的大小写不敏感匹配
 func matchRules(input string, rules []RuleEntry, caseInsensitive bool) *RuleEntry {
 	if input == "" || len(rules) == 0 {
 		return nil
 	}
 
-	// 大小写不敏感：ToLower 只做一次，循环内直接用
-	normalized := input
-	if caseInsensitive {
-		normalized = strings.ToLower(input)
-	}
-
 	for i := range rules {
-		if rules[i].Regex.MatchString(normalized) {
-			return &rules[i]
+		if caseInsensitive {
+			if rules[i].RegexCI != nil && rules[i].RegexCI.MatchString(input) {
+				return &rules[i]
+			}
+		} else {
+			if rules[i].Regex.MatchString(input) {
+				return &rules[i]
+			}
 		}
 	}
 	return nil
