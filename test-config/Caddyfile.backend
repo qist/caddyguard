@@ -1,0 +1,8 @@
+{
+	auto_https off
+}
+
+# 后端服务：返回 ok
+:8080 {
+	respond "ok" 200
+}

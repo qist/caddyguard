@@ -1,0 +1,12 @@
+{
+	auto_https off
+	order caddyguard before reverse_proxy
+}
+
+# B-F: Caddy + CaddyGuard + reverse_proxy
+:8888 {
+	caddyguard {
+		rule_dir /opt/caddyguard/rule-config
+	}
+	reverse_proxy 127.0.0.1:8080
+}
