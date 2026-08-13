@@ -18,6 +18,7 @@ run_scene() {
     local caddyfile="$2"
     local config="$3"
     local extra="$4"
+    local adapter="${5:-caddyguardfile}"
 
     stop_caddy
     # 启动后端
@@ -26,7 +27,7 @@ run_scene() {
     # 部署配置
     if [ -n "$config" ]; then cp "$config" $RULE_DIR/config.json; sleep 3; fi
     # 启动 WAF
-    nohup $CADDY run --config "$caddyfile" --adapter caddyfile > /tmp/caddy_waf.log 2>&1 &
+    nohup $CADDY run --config "$caddyfile" --adapter "$adapter" > /tmp/caddy_waf.log 2>&1 &
     sleep 2
 
     # 验证
@@ -71,7 +72,7 @@ run_scene() {
 echo "======== CaddyGuard 压测+监控 ========" | tee -a $RESULT
 
 # A: Caddy + reverse_proxy
-run_scene "A" "$CONF_DIR/Caddyfile.A" "" ""
+run_scene "A" "$CONF_DIR/Caddyfile.A" "" "" "caddyfile"
 
 # B: WAF off
 cat > /tmp/config_B.json << 'EOF'

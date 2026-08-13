@@ -28,9 +28,10 @@ start_backend() {
 
 start_test() {
     local caddyfile="$1"
+    local adapter="${2:-caddyguardfile}"
     stop_caddy
     start_backend
-    nohup $CADDY run --config "$caddyfile" --adapter caddyfile > $LOG_FILE 2>&1 &
+    nohup $CADDY run --config "$caddyfile" --adapter "$adapter" > $LOG_FILE 2>&1 &
     sleep 2
     code=$(curl -s -m 3 -o /dev/null -w "%{http_code}" -H "$UA" $TARGET)
     if [ "$code" != "200" ]; then
@@ -54,7 +55,7 @@ run_bench() {
 
 # ==========================================
 echo "######## 场景 A: Caddy + reverse_proxy（无 WAF 基准） ########"
-start_test "$CONF_DIR/Caddyfile.A"
+start_test "$CONF_DIR/Caddyfile.A" caddyfile
 RESULT=$(run_bench "A" "")
 RPS=$(echo "$RESULT" | grep "Requests per second" | awk '{print $4}')
 TPR=$(echo "$RESULT" | grep "Time per request.*mean\b" | head -1 | awk '{print $4}')
