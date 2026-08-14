@@ -38,9 +38,9 @@ type ruleFileEntry struct {
 // domainConfigEntry domain.json 缓存条目
 type domainConfigEntry struct {
 	modTime       int64
-	configs       map[string]Config      // 精确域名 → 预合并后的 Config
+	configs       map[string]Config     // 精确域名 → 预合并后的 Config
 	wildcards     []domainWildcardEntry // 通配符域名列表（加载时预解析）
-	lastCheckNano int64                // atomic
+	lastCheckNano int64                 // atomic
 }
 
 // domainWildcardEntry 通配符域名配置
@@ -81,10 +81,10 @@ func shouldCheck(lastCheckNano int64) bool {
 }
 
 // GetRule 获取预编译规则列表（带缓存）
-// 1. 先查域名 rule_dir，文件不存在再回退全局
-// 2. 文件存在但为空 → 返回空列表（不回退）
-//    空文件代表「此域名关闭该规则」，而非「使用全局规则」
-// 3. 文件不存在 → 回退全局目录
+//  1. 先查域名 rule_dir，文件不存在再回退全局
+//  2. 文件存在但为空 → 返回空列表（不回退）
+//     空文件代表「此域名关闭该规则」，而非「使用全局规则」
+//  3. 文件不存在 → 回退全局目录
 func (rc *RuleCache) GetRule(filename string, domainRuleDir string) []RuleEntry {
 	// 1. 检查域名目录
 	if domainRuleDir != "" {
@@ -180,6 +180,7 @@ func parseAndCompileRules(content string) []RuleEntry {
 			RegexCI: reCI,
 		})
 	}
+
 	return rules
 }
 

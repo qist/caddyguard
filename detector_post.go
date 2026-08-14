@@ -3,7 +3,9 @@ package caddyguard
 import (
 	"bytes"
 	"io"
+	"mime"
 	"net/http"
+	"strings"
 )
 
 // postAttackCheck POST body 检测
@@ -28,6 +30,23 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 		return false
 	}
 
+	// Multipart bodies are handled by fileUploadCheck. Scanning the entire
+	// multipart payload with all POST rules would duplicate both the read and
+	// the regex work before the upload detector reads it again.
+	if contentType := r.Header.Get("Content-Type"); contentType != "" {
+		mediaType, _, err := mime.ParseMediaType(contentType)
+		if err == nil && strings.EqualFold(mediaType, "multipart/form-data") {
+			return false
+		}
+	}
+
+	// Load rules before touching the body. An enabled detector with an empty
+	// rule file should be a true no-op and must not consume/rebuild the body.
+	rules := g.ruleCache.GetRule("post.rule", cfg.RuleDir)
+	if len(rules) == 0 {
+		return false
+	}
+
 	// 限制读取大小（防止超大 body 消耗内存）
 	maxSize := int64(10 * 1024 * 1024) // 10MB
 	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxSize))
@@ -39,21 +58,19 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 	// 恢复 body 供后续 handler 使用（用 bytes.NewReader 避免额外的 string 拷贝）
 	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
-	rules := g.ruleCache.GetRule("post.rule", cfg.RuleDir)
-	if rules == nil {
-		return false
-	}
-
-	// 直接用 bodyBytes 进行匹配，避免 string(bodyBytes) 拷贝
-	// matchRules 需要 string 参数，这里必须转换一次
-	bodyStr := string(bodyBytes)
-	if matched := matchRules(bodyStr, rules, true); matched != nil {
+	// Match []byte directly. This avoids a second allocation the size of the
+	// request body caused by converting bodyBytes to string.
+	if matched := matchRulesBytes(bodyBytes, rules, true); matched != nil {
 		// 截断过长的 body 用于日志
-		logBody := bodyStr
+		logBody := bodyBytes
 		if len(logBody) > 1024 {
-			logBody = logBody[:1024] + "..."
+			logBody = logBody[:1024]
 		}
-		g.logger.Record("POST", reqURICached(r), logBody, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+		logData := string(logBody)
+		if len(bodyBytes) > 1024 {
+			logData += "..."
+		}
+		g.logger.Record("POST", reqURICached(r), logData, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 		g.wafOutput(w, cfg)
 		return true
 	}

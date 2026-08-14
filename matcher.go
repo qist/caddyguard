@@ -36,6 +36,26 @@ func matchRules(input string, rules []RuleEntry, caseInsensitive bool) *RuleEntr
 	return nil
 }
 
+// matchRulesBytes is the allocation-free equivalent of matchRules for request
+// bodies. regexp.Regexp can match []byte directly, so callers do not need to
+// convert a potentially large body to string before scanning it.
+func matchRulesBytes(input []byte, rules []RuleEntry, caseInsensitive bool) *RuleEntry {
+	if len(input) == 0 || len(rules) == 0 {
+		return nil
+	}
+
+	for i := range rules {
+		re := rules[i].Regex
+		if caseInsensitive {
+			re = rules[i].RegexCI
+		}
+		if re != nil && re.Match(input) {
+			return &rules[i]
+		}
+	}
+	return nil
+}
+
 // regexCache 用于运行时动态编译的正则缓存（IP glob 等）
 var regexCache sync.Map // key: pattern → value: *regexp.Regexp
 
@@ -72,9 +92,11 @@ var globEscapeRe = regexp.MustCompile(`([.+?[\](){}$^])`)
 
 // globToRegex 将 glob 通配符转为正则
 // 支持 IPv4 和 IPv6 通配符：
-//   192.168.0.*  → ^192\.168\.0\.[0-9a-fA-F:]+$   (IPv4)
-//   2001:db8::*  → ^2001:db8::[0-9a-fA-F:]+$       (IPv6)
-//   192.168.*.* → ^192\.168\.[0-9a-fA-F:]+\.[0-9a-fA-F:]+$
+//
+//	192.168.0.*  → ^192\.168\.0\.[0-9a-fA-F:]+$   (IPv4)
+//	2001:db8::*  → ^2001:db8::[0-9a-fA-F:]+$       (IPv6)
+//	192.168.*.* → ^192\.168\.[0-9a-fA-F:]+\.[0-9a-fA-F:]+$
+//
 // 无 * 则原样返回（视为正则）
 func globToRegex(pattern string) string {
 	if !strings.Contains(pattern, "*") {

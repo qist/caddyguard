@@ -18,7 +18,7 @@ Caddy v2 WAF (Web Application Firewall) 插件 — 用 Go 原生编写，为 Cad
 
 ### 前置要求
 
-- Go 1.22+
+- Go 1.23+（go.mod 最低依赖 go 1.25.1，建议使用 Go 1.23+）
 - [xcaddy](https://github.com/caddyserver/xcaddy) 构建工具
 - Caddy v2.10.1+（go.mod 最低依赖 v2.10.1，兼容 v2.10.1 ~ v2.11.4）
 
@@ -123,24 +123,27 @@ caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
 /etc/caddyguard/rule-config/
 ├── config.json              # 全局 WAF 配置
 ├── domain.json              # 域名级配置覆盖
-├── url.rule                 # URL 路径黑名单（92 条规则）
-├── args.rule                # URL 参数黑名单（95 条规则，SQL注入/XSS/SSTI/RCE等）
-├── post.rule                # POST body 黑名单（96 条规则）
-├── cookie.rule              # Cookie 黑名单（96 条规则）
-├── useragent.rule           # 恶意 User-Agent 黑名单（5 条规则，扫描器/爬虫）
-├── referer.rule             # 恶意 Referer 黑名单（8 条规则，支付接口保护）
-├── whiteip.rule             # IP 白名单（1 条）
-├── whiteua.rule             # User-Agent 白名单（44 条，搜索引擎蜘蛛）
-├── whiteurl.rule            # URL 白名单（1 条）
-├── blackip.rule             # IP 黑名单（0 条，空文件）
-├── fileext.rule             # 文件上传扩展名黑名单（2 条规则）
+├── url.rule                 # URL 路径黑名单
+├── args.rule                # URL 参数黑名单（SQL注入/XSS/SSTI/RCE等）
+├── post.rule                # POST body 黑名单
+├── cookie.rule              # Cookie 黑名单
+├── useragent.rule           # 恶意 User-Agent 黑名单（扫描器/爬虫）
+├── referer.rule             # 恶意 Referer 黑名单（支付接口保护）
+├── whiteip.rule             # IP 白名单
+├── whiteua.rule             # User-Agent 白名单（搜索引擎蜘蛛）
+├── whiteurl.rule            # URL 白名单
+├── blackip.rule             # IP 黑名单
+├── fileext.rule             # 文件上传扩展名黑名单
 └── domains/                 # 域名级独立规则目录
-    └── www.example.com/     # 该域名专用规则（8 个 .rule 文件）
+    └── www.example.com/     # 该域名专用规则（12 个 .rule 文件）
         ├── url.rule
         ├── args.rule
         ├── post.rule
         ├── cookie.rule
         ├── useragent.rule
+        ├── whiteua.rule
+        ├── referer.rule
+        ├── fileext.rule
         ├── whiteip.rule
         ├── whiteurl.rule
         └── blackip.rule
@@ -302,7 +305,7 @@ YandexBot
 | 8 | URL 参数 | `args.rule` | SQL 注入、XSS、SSTI、RCE 等 |
 | 9 | Cookie | `cookie.rule` | Cookie 注入 |
 | 10 | Referer | `referer.rule` | 恶意来源、支付接口保护 |
-| 11 | POST body | `post.rule` | 需读取 body，最昂贵 |
+| 11 | POST body | `post.rule` | 需读取 body；multipart 交由文件上传检测处理，空规则不读取 body |
 | 12 | 文件上传 | `fileext.rule` | 需解析 multipart，最昂贵 |
 
 ## 热加载
@@ -368,15 +371,33 @@ CaddyGuard 支持规则和配置的热加载：
 
 ### 压测对比
 
-| 场景 | req/s | CPU | RSS | P99 | 开销 |
-|------|-------|-----|-----|-----|------|
-| Caddy + reverse_proxy（无 WAF） | 6,372 | 140% | 70 MB | 69ms | 基准 |
-| CaddyGuard 规则全关 | 6,454 | 168% | 72 MB | 68ms | ~0% |
-| CaddyGuard 规则全开（不含 CC） | 5,954 | 178% | 79 MB | 74ms | ~7% |
-| CaddyGuard + CC | 5,936 | 179% | 76 MB | 75ms | ~7% |
-| CaddyGuard + POST body | 5,092 | 198% | 77 MB | 92ms | ~20% |
+| 场景 | req/s | P99 | 开销 | 说明 |
+|------|-------|-----|------|------|
+| Caddy + reverse_proxy（无 WAF） | 6,427 | 71ms | 基准 | 无 WAF 的 Caddy 反向代理 |
+| CaddyGuard 规则全关 | 6,339 | 69ms | ~0% | WAF 开启但所有规则关闭 |
+| CaddyGuard 规则全开（不含 CC） | 5,693 | 81ms | ~11% | 12 项检测全开 |
+| CaddyGuard + CC | 5,759 | 76ms | ~10% | 含 CC 实时计数 |
+| CaddyGuard + POST body | 4,012 | 117ms | ~37% | POST body 读取 + 正则匹配 |
+| 路径级 WAF off（webhook） | 10,697 | 22ms | — | waf_enable off 路径直返 |
+| 路径级 WAF on（同配置） | 10,645 | 29ms | — | 同配置 WAF on 路径对比 |
 
-> CPU 为压测期间 pidstat 采样的平均值（4 核机器，>100% 表示多核占用）。RSS 为压测期间峰值内存。
+> 测试参数：50000 请求，200 并发，本机回环。P99 为 99% 请求延迟。
+
+### 单项检测性能对比
+
+| 检测项 | req/s | P99 | vs 基准 | 说明 |
+|--------|-------|-----|---------|------|
+| 无 WAF 基准 | 6,427 | 71ms | — | Caddy + reverse_proxy |
+| 仅 URL 检测 | 6,369 | 70ms | -0.9% | URL 路径 regex |
+| URL + 参数检测 | 6,467 | 69ms | +0.6% | URL + 参数 regex |
+| 仅 UA 检测 | 5,968 | 77ms | -7.1% | Header 读取 + regex |
+| 仅 Cookie 检测 | 6,351 | 74ms | -1.2% | Header 读取 + regex |
+| 仅 IP 黑白名单 | 6,391 | 69ms | -0.6% | CIDR/glob/精确匹配 |
+| 仅 CC 检测 | 6,389 | 70ms | -0.6% | 64 分片 map 计数 |
+| 仅 POST body | 4,383 | 103ms | -31.8% | body I/O + regex |
+| 仅白名单 | 6,261 | 73ms | -2.6% | IP/URL/UA 白名单 |
+
+> POST body 的性能开销主要来自 body I/O 读取，非正则匹配本身。
 
 ### Go Benchmark 微基准
 
@@ -505,14 +526,22 @@ caddyguard/
 ├── domain.go              # 域名级配置查找（预合并缓存）
 ├── rules.go               # 规则缓存 + 热加载 + 配置预合并
 ├── adapter.go             # caddyguardfile 适配器（全局自动注入 Guard handler）
-├── matcher.go             # 正则匹配引擎（预编译 + (?i) 大小写不敏感）
+├── matcher.go             # 正则匹配引擎（预编译 + (?i) 大小写不敏感 + []byte 直接匹配）
 ├── storage.go             # CC 存储（64 分片 + 滑动窗口 + 内存上限）
 ├── logger.go              # 异步日志（buffered channel + worker）
 ├── request_context.go     # 请求上下文缓存（clientIP, URI）
+├── utils.go               # 辅助工具函数
 ├── detector_ip.go         # IP 黑白名单检测（IPv4/IPv6 CIDR + glob + 精确匹配）
-├── detector_*.go          # 其他检测器实现（URL/UA/Cookie/POST 等）
+├── detector_url.go        # URL 路径 + URL 参数检测
+├── detector_ua.go         # User-Agent 检测（黑名单 + 白名单）
+├── detector_cookie.go     # Cookie 注入检测
+├── detector_post.go       # POST body 检测（跳过 multipart + []byte 直接匹配）
+├── detector_cc.go         # CC 攻击检测（64 分片滑动窗口）
+├── detector_referer.go    # Referer 检测
+├── detector_fileupload.go # 文件上传扩展名检测
 ├── module_test.go         # 适配器单元测试
 ├── ip_test.go             # IP 匹配单元测试（IPv4/IPv6 CIDR/glob/精确）
+├── servehttp_test.go      # ServeHTTP 集成测试
 ├── bench_test.go          # Go benchmark 测试
 ├── rule-config/           # 规则配置文件
 │   ├── config.json        # 全局 WAF 配置
