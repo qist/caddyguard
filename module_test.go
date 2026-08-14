@@ -51,6 +51,37 @@ func TestCaddyguardIsNotInjectedWithoutGlobalOption(t *testing.T) {
 	}
 }
 
+func TestPathRouteCanDisableWAFWithoutLocationRule(t *testing.T) {
+	config, err := adaptCaddyfile(t, `
+{
+    caddyguard {
+        rule_dir /tmp/rules
+    }
+}
+
+example.com {
+    @webhook path /api/webhook/*
+    route @webhook {
+        caddyguard waf_enable off
+        respond webhook
+    }
+    respond protected
+}
+`)
+	if err != nil {
+		t.Fatalf("adapt path route Caddyfile: %v", err)
+	}
+
+	// The path route owns its caddyguard handler, so the adapter must not add
+	// a second global handler in front of that route.
+	if count := strings.Count(string(config), `"handler":"caddyguard"`); count != 2 {
+		t.Fatalf("expected one global and one path-route caddyguard handler, got %d in config: %s", count, config)
+	}
+	if !strings.Contains(string(config), `"waf_enable":"off"`) {
+		t.Fatalf("path-route waf_enable setting missing from adapted config: %s", config)
+	}
+}
+
 func adaptCaddyfile(t *testing.T, input string) ([]byte, error) {
 	t.Helper()
 	adapter := caddyconfig.GetAdapter("caddyguardfile")

@@ -23,7 +23,7 @@ type Config struct {
 	RefererCheck    string `json:"referer_check"`     // Referer 检测开关
 	FileUploadCheck string `json:"file_upload_check"` // 文件上传检测开关
 
-	WAFOutput      string `json:"waf_output"`      // 拦截输出 "html" / "redirect"
+	WAFOutput      string `json:"waf_output"`       // 拦截输出 "html" / "redirect"
 	WAFRedirectURL string `json:"waf_redirect_url"` // 重定向 URL
 }
 

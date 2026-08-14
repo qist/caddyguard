@@ -36,13 +36,37 @@
 	}
 }
 
-# sub.wyfc.qzz.io - HTTPS (caddyguard 全局自动生效，无需站点级配置)
+# sub.wyfc.qzz.io - HTTPS
+# 全局 WAF 自动生效，无需站点级 caddyguard 指令
 sub.wyfc.qzz.io:8443 {
 	tls /opt/corefusion/data/certs/gg/cert.pem /opt/corefusion/data/certs/gg/key.pem
 
 	log {
 		output stdout
 		format json
+	}
+
+	# 使用 Caddy 原生 path matcher，路径只声明一次
+	@webhook path /api/webhook /api/webhook/*
+	route @webhook {
+		caddyguard waf_enable off
+		reverse_proxy {
+			to 127.0.0.1:8081
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+
+	@upload path /upload /upload/*
+	route @upload {
+		caddyguard waf_enable off
+		reverse_proxy {
+			to 127.0.0.1:8081
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
 	}
 
 	reverse_proxy {

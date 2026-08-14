@@ -2,6 +2,7 @@ package caddyguard
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -59,6 +60,8 @@ type Guard struct {
 	ccStore   CCStore
 	logger    *WAFLogger
 
+	WAFEnable string `json:"waf_enable,omitempty"` // 站点级 WAF 总开关
+
 	cleanupCtx    context.Context    `json:"-"`
 	cleanupCancel context.CancelFunc `json:"-"`
 }
@@ -96,6 +99,27 @@ func parseGlobalOption(d *caddyfile.Dispenser, _ any) (any, error) {
 func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	g := &Guard{}
 	for h.Next() {
+		// Allow the handler to be attached directly to a Caddy route selected
+		// by a path matcher, for example:
+		//
+		//   @webhook path /api/webhook/*
+		//   route @webhook {
+		//       caddyguard waf_enable off
+		//       reverse_proxy 127.0.0.1:8080
+		//   }
+		//
+		// The route matcher is then the single source of truth for the path;
+		// caddyguard only carries the route-local WAF setting.
+		if h.NextArg() {
+			if h.Val() != "waf_enable" || !h.NextArg() {
+				return nil, h.ArgErr()
+			}
+			g.WAFEnable = h.Val()
+			if h.NextArg() {
+				return nil, h.ArgErr()
+			}
+			continue
+		}
 		for h.NextBlock(0) {
 			switch h.Val() {
 			case "rule_dir":
@@ -103,6 +127,16 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 					return nil, h.ArgErr()
 				}
 				g.RuleDir = h.Val()
+
+			case "waf_enable":
+				// 站点级 WAF 总开关：waf_enable off
+				if !h.NextArg() {
+					return nil, h.ArgErr()
+				}
+				g.WAFEnable = h.Val()
+
+			default:
+				return nil, fmt.Errorf("unknown caddyguard option %q; use caddyguard waf_enable off inside a Caddy path route", h.Val())
 			}
 		}
 	}
@@ -168,7 +202,8 @@ func (g *Guard) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp
 	}()
 
 	cfg := g.GetEffectiveConfig(r)
-	if cfg.WAFEnable == "off" {
+	// 站点级 WAF 总开关（Caddyfile 中配置的 waf_enable off 优先于 config.json）
+	if g.WAFEnable == "off" || cfg.WAFEnable == "off" {
 		return next.ServeHTTP(w, r)
 	}
 	blocked := g.runChecks(w, r, cfg)

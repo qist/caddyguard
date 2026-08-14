@@ -1,0 +1,25 @@
+{
+	auto_https off
+	caddyguard {
+		rule_dir /opt/caddyguard/rule-config
+	}
+}
+
+:8080 {
+	# /api/webhook/* 关闭 WAF
+	@webhook path /api/webhook /api/webhook/*
+	route @webhook {
+		caddyguard waf_enable off
+		respond "webhook-ok" 200
+	}
+
+	# /upload/* 关闭 WAF
+	@upload path /upload /upload/*
+	route @upload {
+		caddyguard waf_enable off
+		respond "upload-ok" 200
+	}
+
+	# 其他路径走 WAF
+	respond "default-ok" 200
+}

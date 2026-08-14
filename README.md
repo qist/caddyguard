@@ -10,6 +10,7 @@ Caddy v2 WAF (Web Application Firewall) 插件 — 用 Go 原生编写，为 Cad
 - **高性能**：正则预编译（含 `(?i)` 大小写不敏感版本）+ 64 分片 CC 存储 + Config 预合并缓存，WAF 开启仅 ~7% 性能开销
 - **热加载**：规则和配置文件修改后 2 秒内自动生效，无需重启 Caddy
 - **域名级配置**：支持全局配置 + 按域名覆盖（精确匹配 + 通配符）+ 域名级独立规则目录
+- **路径级配置**：支持基于 Caddy 原生 `path` matcher 的 WAF 开关，可对特定 URL 路径关闭 WAF（如 webhook、上传接口等）
 - **零 reflect/unsafe**：使用 Caddy 标准中间件链，不依赖私有字段反射
 - **ReDoS 安全**：基于 Go RE2 正则引擎，无回溯爆炸风险
 
@@ -191,6 +192,27 @@ caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
 - **精确域名**：`www.example.com` → O(1) map 查找
 - **通配符域名**：`*.example.com` → 加载时预解析为列表，按后缀匹配
 - **域名级规则目录**：`rule_dir` 指定域名专用规则目录，该域名请求使用独立规则文件覆盖全局规则
+
+### path 级别 WAF 开关
+
+推荐使用 Caddy 原生 `path` matcher 明确路径，再在对应的 `route` 中写
+`caddyguard waf_enable off`。这样路径只维护一份，由 Caddy route 直接管理。
+
+```caddyfile
+sub.example.com {
+    @webhook path /api/webhook/*
+    route @webhook {
+        caddyguard waf_enable off
+        reverse_proxy 127.0.0.1:8080
+    }
+}
+```
+
+- **路径由 Caddy 管理**：支持 Caddy 原生 `path` matcher 的路径语义和通配符
+- **route 局部生效**：只有命中该 path route 的请求会关闭 WAF
+- **站点级开关**：在站点级 `caddyguard` 块中写 `waf_enable off` 可关闭整个站点的 WAF
+- **自动注入逻辑**：使用 `caddyguardfile` 适配器时，含有站点或 route 级 `caddyguard` 的 route 不会重复注入全局 handler
+- **典型场景**：webhook 回调接口、文件上传接口、健康检查接口等需要关闭 WAF 的路径
 
 ### 规则文件格式
 
