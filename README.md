@@ -7,7 +7,7 @@ Caddy v2 WAF (Web Application Firewall) 插件 — 用 Go 原生编写，为 Cad
 - **全局自动生效**：全局配置一次 `rule_dir`，所有站点自动启用 WAF，无需每个站点单独写 `caddyguard` 指令（通过 `caddyguardfile` 适配器实现）
 - **12 项检测链**：白名单 IP/URL/UA、黑名单 IP、CC 攻击防护、URL 路径/参数检测、User-Agent/Cookie/Referer 检测、POST body 检测、文件上传扩展名检测
 - **IPv4/IPv6 双栈**：IP 黑白名单同时支持 IPv4 和 IPv6，支持 CIDR 表示法（`192.168.1.0/24`、`2001:db8::/32`）、glob 通配符（`192.168.*.*`、`2001:db8::*`）和精确匹配
-- **高性能**：正则预编译（含 `(?i)` 大小写不敏感版本）+ 64 分片 CC 存储 + Config 预合并缓存，WAF 开启仅 ~7% 性能开销
+- **高性能**：正则预编译（含 `(?i)` 大小写不敏感版本）+ POST body 关键词预过滤 + 64 分片 CC 存储 + Config 预合并缓存，WAF 全规则开启仅 ~11% 性能开销
 - **热加载**：规则和配置文件修改后 2 秒内自动生效，无需重启 Caddy
 - **域名级配置**：支持全局配置 + 按域名覆盖（精确匹配 + 通配符）+ 域名级独立规则目录
 - **路径级配置**：支持基于 Caddy 原生 `path` matcher 的 WAF 开关，可对特定 URL 路径关闭 WAF（如 webhook、上传接口等）
@@ -305,7 +305,7 @@ YandexBot
 | 8 | URL 参数 | `args.rule` | SQL 注入、XSS、SSTI、RCE 等 |
 | 9 | Cookie | `cookie.rule` | Cookie 注入 |
 | 10 | Referer | `referer.rule` | 恶意来源、支付接口保护 |
-| 11 | POST body | `post.rule` | 需读取 body；multipart 交由文件上传检测处理，空规则不读取 body |
+| 11 | POST body | `post.rule` | 需读取 body；关键词预过滤跳过正常请求；multipart 交由文件上传检测；空规则不读取 body |
 | 12 | 文件上传 | `fileext.rule` | 需解析 multipart，最昂贵 |
 
 ## 热加载
@@ -377,7 +377,7 @@ CaddyGuard 支持规则和配置的热加载：
 | CaddyGuard 规则全关 | 6,339 | 69ms | ~0% | WAF 开启但所有规则关闭 |
 | CaddyGuard 规则全开（不含 CC） | 5,693 | 81ms | ~11% | 12 项检测全开 |
 | CaddyGuard + CC | 5,759 | 76ms | ~10% | 含 CC 实时计数 |
-| CaddyGuard + POST body | 4,012 | 117ms | ~37% | POST body 读取 + 正则匹配 |
+| CaddyGuard + POST body | 5,243 | 88ms | ~18% | POST body 读取 + 关键词预过滤 + 正则匹配 |
 | 路径级 WAF off（webhook） | 10,697 | 22ms | — | waf_enable off 路径直返 |
 | 路径级 WAF on（同配置） | 10,645 | 29ms | — | 同配置 WAF on 路径对比 |
 
@@ -394,10 +394,10 @@ CaddyGuard 支持规则和配置的热加载：
 | 仅 Cookie 检测 | 6,351 | 74ms | -1.2% | Header 读取 + regex |
 | 仅 IP 黑白名单 | 6,391 | 69ms | -0.6% | CIDR/glob/精确匹配 |
 | 仅 CC 检测 | 6,389 | 70ms | -0.6% | 64 分片 map 计数 |
-| 仅 POST body | 4,383 | 103ms | -31.8% | body I/O + regex |
+| 仅 POST body | 5,967 | 74ms | -6.9% | body I/O + 关键词预过滤 + regex |
 | 仅白名单 | 6,261 | 73ms | -2.6% | IP/URL/UA 白名单 |
 
-> POST body 的性能开销主要来自 body I/O 读取，非正则匹配本身。
+> POST body 检测使用关键词预过滤（bytes.Contains SIMD 优化），正常请求直接跳过 96 条正则，仅约 7% 开销。剩余开销来自 Caddy 框架的 body I/O（读取 + 恢复 + reverse_proxy 二次读取），非 WAF 逻辑本身。
 
 ### Go Benchmark 微基准
 
@@ -535,7 +535,7 @@ caddyguard/
 ├── detector_url.go        # URL 路径 + URL 参数检测
 ├── detector_ua.go         # User-Agent 检测（黑名单 + 白名单）
 ├── detector_cookie.go     # Cookie 注入检测
-├── detector_post.go       # POST body 检测（跳过 multipart + []byte 直接匹配）
+├── detector_post.go       # POST body 检测（关键词预过滤 + 跳过 multipart + []byte 直接匹配）
 ├── detector_cc.go         # CC 攻击检测（64 分片滑动窗口）
 ├── detector_referer.go    # Referer 检测
 ├── detector_fileupload.go # 文件上传扩展名检测
