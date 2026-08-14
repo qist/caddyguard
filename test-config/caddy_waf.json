@@ -1,0 +1,34 @@
+{
+	"apps": {
+		"caddyguard": {
+			"rule_dir": "/opt/caddyguard/rule-config"
+		},
+		"http": {
+			"servers": {
+				"srv0": {
+					"automatic_https": {
+						"disable": true
+					},
+					"listen": [":8888"],
+					"routes": [
+						{
+							"handle": [
+								{
+									"handler": "caddyguard"
+								},
+								{
+									"handler": "reverse_proxy",
+									"upstreams": [
+										{
+											"dial": "127.0.0.1:8080"
+										}
+									]
+								}
+							]
+						}
+					]
+				}
+			}
+		}
+	}
+}

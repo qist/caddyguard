@@ -51,7 +51,7 @@ CGO_ENABLED=0 xcaddy build --with github.com/qist/caddyguard --output ./caddy-li
 
 ## 配置
 
-CaddyGuard 提供两种配置方式：
+CaddyGuard 提供三种配置方式：
 
 ### 方式 1：全局配置 + `caddyguardfile` 适配器（推荐）
 
@@ -107,15 +107,64 @@ example.com {
 caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
 ```
 
-### 两种方式对比
+### 方式 3：JSON 配置（适合自动化部署 / Docker / K8s）
 
-| | 方式 1：caddyguardfile | 方式 2：caddyfile |
-|---|---|---|
-| 全局配置 | ✅ 一次配置，所有站点自动生效 | ❌ 每个站点需单独写 |
-| 站点块 | 只写业务指令 | 需写 `caddyguard` 指令 |
-| 启动参数 | `--adapter caddyguardfile` | `--adapter caddyfile`（默认） |
-| 站点级覆盖 | 支持（站点写 `caddyguard { rule_dir ... }`） | 支持 |
-| 推荐场景 | 多站点统一 WAF | 单站点或精细控制 |
+直接使用 Caddy 原生 JSON 配置，无需 adapter。WAF handler 需手动写在每个 route 的 `handle` 列表最前面。
+
+```json
+{
+    "apps": {
+        "caddyguard": {
+            "rule_dir": "/etc/caddyguard/rule-config"
+        },
+        "http": {
+            "servers": {
+                "srv0": {
+                    "automatic_https": { "disable": true },
+                    "listen": [":80"],
+                    "routes": [
+                        {
+                            "handle": [
+                                {
+                                    "handler": "caddyguard"
+                                },
+                                {
+                                    "handler": "reverse_proxy",
+                                    "upstreams": [{ "dial": "127.0.0.1:8080" }]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+    }
+}
+```
+
+启动时**不需要** `--adapter` 参数（默认即为 JSON）：
+
+```bash
+caddy run --config /etc/caddy/caddy.json
+```
+
+**关键点**：
+- `apps.caddyguard.rule_dir` 指定规则目录，与 Caddyfile 方式等效
+- 每个 route 的 `handle` 列表中，`{"handler": "caddyguard"}` 必须写在其他 handler（如 `reverse_proxy`）**前面**，确保 WAF 检测在反代之前执行
+- 路径级 WAF 开关：在特定 route 的 `handle` 中写 `{"handler": "caddyguard", "waf_enable": "off"}` 即可跳过该路径的 WAF
+- WAF 检测开关（`url_check`、`post_check` 等）仍由 `rule_dir/config.json` 控制，与 Caddyfile 方式完全一致
+
+### 三种方式对比
+
+| | 方式 1：caddyguardfile | 方式 2：caddyfile | 方式 3：JSON |
+|---|---|---|---|
+| 全局配置 | ✅ 一次配置，所有站点自动生效 | ❌ 每个站点需单独写 | ❌ 每个 route 需手动写 |
+| 站点块 | 只写业务指令 | 需写 `caddyguard` 指令 | 需写 `caddyguard` handler |
+| 启动参数 | `--adapter caddyguardfile` | `--adapter caddyfile`（默认） | 不需要 adapter |
+| 站点级覆盖 | 支持（站点写 `caddyguard { rule_dir ... }`） | 支持 | 支持（route 级 `waf_enable`） |
+| 路径级开关 | ✅ Caddy 原生 path matcher | ✅ Caddy 原生 path matcher | ✅ route 级 `waf_enable: off` |
+| 自动注入 | ✅ adapter 自动注入 handler | ❌ 需手动写 `caddyguard` 指令 | ❌ 需手动写 handler |
+| 推荐场景 | 多站点统一 WAF | 单站点或精细控制 | 自动化部署 / Docker / K8s |
 
 ### 规则目录结构
 
