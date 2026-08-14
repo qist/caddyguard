@@ -1,0 +1,57 @@
+{
+	"apps": {
+		"caddyguard": {
+			"rule_dir": "/etc/caddyguard/rule-config"
+		},
+		"http": {
+			"servers": {
+				"srv0": {
+					"listen": [":80"],
+					"routes": [
+						{
+							"handle": [
+								{
+									"handler": "subroute",
+									"routes": [
+										{
+											"match": [
+												{
+													"path": ["/api/webhook", "/api/webhook/*"]
+												}
+											],
+											"handle": [
+												{
+													"handler": "caddyguard",
+													"waf_enable": "off"
+												},
+												{
+													"handler": "reverse_proxy",
+													"upstreams": [
+														{
+															"dial": "127.0.0.1:8080"
+														}
+													]
+												}
+											]
+										}
+									]
+								},
+								{
+									"handler": "caddyguard"
+								},
+								{
+									"handler": "reverse_proxy",
+									"upstreams": [
+										{
+											"dial": "127.0.0.1:8080"
+										}
+									]
+								}
+							]
+						}
+					]
+				}
+			}
+		}
+	}
+}

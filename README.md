@@ -7,7 +7,7 @@ Caddy v2 WAF (Web Application Firewall) 插件 — 用 Go 原生编写，为 Cad
 - **全局自动生效**：全局配置一次 `rule_dir`，所有站点自动启用 WAF，无需每个站点单独写 `caddyguard` 指令（通过 `caddyguardfile` 适配器实现）
 - **12 项检测链**：白名单 IP/URL/UA、黑名单 IP、CC 攻击防护、URL 路径/参数检测、User-Agent/Cookie/Referer 检测、POST body 检测、文件上传扩展名检测
 - **IPv4/IPv6 双栈**：IP 黑白名单同时支持 IPv4 和 IPv6，支持 CIDR 表示法（`192.168.1.0/24`、`2001:db8::/32`）、glob 通配符（`192.168.*.*`、`2001:db8::*`）和精确匹配
-- **高性能**：正则预编译（含 `(?i)` 大小写不敏感版本）+ POST body 关键词预过滤 + 64 分片 CC 存储 + Config 预合并缓存，WAF 全规则开启仅 ~11% 性能开销
+- **高性能**：正则预编译（含 `(?i)` 大小写不敏感版本）+ POST body 关键词自动提取预过滤 + 64 分片 CC 存储 + Config 预合并缓存，WAF 全规则开启仅 ~11% 性能开销
 - **热加载**：规则和配置文件修改后 2 秒内自动生效，无需重启 Caddy
 - **域名级配置**：支持全局配置 + 按域名覆盖（精确匹配 + 通配符）+ 域名级独立规则目录
 - **路径级配置**：支持基于 Caddy 原生 `path` matcher 的 WAF 开关，可对特定 URL 路径关闭 WAF（如 webhook、上传接口等）
@@ -305,7 +305,7 @@ YandexBot
 | 8 | URL 参数 | `args.rule` | SQL 注入、XSS、SSTI、RCE 等 |
 | 9 | Cookie | `cookie.rule` | Cookie 注入 |
 | 10 | Referer | `referer.rule` | 恶意来源、支付接口保护 |
-| 11 | POST body | `post.rule` | 需读取 body；关键词预过滤跳过正常请求；multipart 交由文件上传检测；空规则不读取 body |
+| 11 | POST body | `post.rule` | 需读取 body；关键词自动提取预过滤跳过正常请求；multipart 交由文件上传检测；空规则不读取 body |
 | 12 | 文件上传 | `fileext.rule` | 需解析 multipart，最昂贵 |
 
 ## 热加载
@@ -373,13 +373,13 @@ CaddyGuard 支持规则和配置的热加载：
 
 | 场景 | req/s | P99 | 开销 | 说明 |
 |------|-------|-----|------|------|
-| Caddy + reverse_proxy（无 WAF） | 6,427 | 71ms | 基准 | 无 WAF 的 Caddy 反向代理 |
-| CaddyGuard 规则全关 | 6,339 | 69ms | ~0% | WAF 开启但所有规则关闭 |
-| CaddyGuard 规则全开（不含 CC） | 5,693 | 81ms | ~11% | 12 项检测全开 |
-| CaddyGuard + CC | 5,759 | 76ms | ~10% | 含 CC 实时计数 |
-| CaddyGuard + POST body | 5,243 | 88ms | ~18% | POST body 读取 + 关键词预过滤 + 正则匹配 |
-| 路径级 WAF off（webhook） | 10,697 | 22ms | — | waf_enable off 路径直返 |
-| 路径级 WAF on（同配置） | 10,645 | 29ms | — | 同配置 WAF on 路径对比 |
+| Caddy + reverse_proxy（无 WAF） | 6,446 | 71ms | 基准 | 无 WAF 的 Caddy 反向代理 |
+| CaddyGuard 规则全关 | 6,413 | 71ms | ~0% | WAF 开启但所有规则关闭 |
+| CaddyGuard 规则全开（不含 CC） | 5,713 | 79ms | ~11% | 12 项检测全开 + 关键词预过滤 |
+| CaddyGuard + CC | 5,729 | 80ms | ~11% | 含 CC 实时计数 |
+| CaddyGuard + POST body | 4,991 | 93ms | ~23% | POST body 读取 + 关键词预过滤 + 正则匹配 |
+| 路径级 WAF off（webhook） | 10,554 | 23ms | — | waf_enable off 路径直返 |
+| 路径级 WAF on（同配置） | 10,636 | 27ms | — | 同配置 WAF on 路径对比 |
 
 > 测试参数：50000 请求，200 并发，本机回环。P99 为 99% 请求延迟。
 
@@ -387,17 +387,17 @@ CaddyGuard 支持规则和配置的热加载：
 
 | 检测项 | req/s | P99 | vs 基准 | 说明 |
 |--------|-------|-----|---------|------|
-| 无 WAF 基准 | 6,427 | 71ms | — | Caddy + reverse_proxy |
-| 仅 URL 检测 | 6,369 | 70ms | -0.9% | URL 路径 regex |
-| URL + 参数检测 | 6,467 | 69ms | +0.6% | URL + 参数 regex |
-| 仅 UA 检测 | 5,968 | 77ms | -7.1% | Header 读取 + regex |
-| 仅 Cookie 检测 | 6,351 | 74ms | -1.2% | Header 读取 + regex |
-| 仅 IP 黑白名单 | 6,391 | 69ms | -0.6% | CIDR/glob/精确匹配 |
-| 仅 CC 检测 | 6,389 | 70ms | -0.6% | 64 分片 map 计数 |
-| 仅 POST body | 5,967 | 74ms | -6.9% | body I/O + 关键词预过滤 + regex |
-| 仅白名单 | 6,261 | 73ms | -2.6% | IP/URL/UA 白名单 |
+| 无 WAF 基准 | 6,446 | 71ms | — | Caddy + reverse_proxy |
+| 仅 URL 检测 | 6,373 | 73ms | -1.1% | URL 路径 regex |
+| URL + 参数检测 | 6,386 | 72ms | -0.9% | URL + 参数 regex |
+| 仅 UA 检测 | 5,881 | 76ms | -8.8% | Header 读取 + regex |
+| 仅 Cookie 检测 | 6,382 | 71ms | -1.0% | Header 读取 + regex |
+| 仅 IP 黑白名单 | 6,336 | 71ms | -1.7% | CIDR/glob/精确匹配 |
+| 仅 CC 检测 | 6,346 | 70ms | -1.5% | 64 分片 map 计数 |
+| 仅 POST body | 5,587 | 79ms | -13.3% | body I/O + 关键词预过滤 + regex |
+| 仅白名单 | 6,359 | 68ms | -1.4% | IP/URL/UA 白名单 |
 
-> POST body 检测使用关键词预过滤（bytes.Contains SIMD 优化），正常请求直接跳过 96 条正则，仅约 7% 开销。剩余开销来自 Caddy 框架的 body I/O（读取 + 恢复 + reverse_proxy 二次读取），非 WAF 逻辑本身。
+> POST body 检测使用自动关键词预过滤：加载阶段从每条正则规则中自动提取字面量关键词，请求阶段先做 bytes.Contains 检查（SIMD 优化），不包含任何关键词的 body 直接跳过全部正则。剩余开销来自 Caddy 框架的 body I/O（读取 + 恢复 + reverse_proxy 二次读取），非 WAF 逻辑本身。
 
 ### Go Benchmark 微基准
 
@@ -429,7 +429,7 @@ CaddyGuard 支持规则和配置的热加载：
 | 畸形 HTTP 请求 | ✅ | 未崩溃 |
 | 二进制垃圾数据 | ✅ | 未崩溃 |
 | 1000 个 Cookie | ✅ | 未崩溃 |
-| 16 种攻击拦截 | ✅ | 全部正确拦截 (403) |
+| 44 种攻击拦截 | ✅ | 全部正确拦截 (403)，含 URL/Args/UA/Cookie/POST 各类攻击 |
 | IPv4 黑名单 CIDR 拦截 | ✅ | 192.168.1.0/24 正确拦截 (403) |
 | IPv6 黑名单 CIDR 拦截 | ✅ | 2001:db8::/32 正确拦截 (403) |
 | IPv4 白名单放行 | ✅ | 8.8.8.8 跳过所有检测 (200) |
@@ -452,6 +452,15 @@ CaddyGuard 支持规则和配置的热加载：
 | dirb UA | 403 | ✅ 403 | UA 黑名单检测 |
 | Cookie 注入 | 403 | ✅ 403 | Cookie 检测 |
 | POST SQL 注入 | 403 | ✅ 403 | POST body 检测 |
+| POST XSS | 403 | ✅ 403 | POST body 检测 |
+| POST 路径遍历 | 403 | ✅ 403 | POST body 检测 |
+| POST base64_decode | 403 | ✅ 403 | POST body 检测 |
+| POST `$_GET` 注入 | 403 | ✅ 403 | POST body 检测 |
+| POST SSTI `{{__class__}}` | 403 | ✅ 403 | POST body 检测 |
+| POST `CONCAT()` | 403 | ✅ 403 | POST body 检测（大小写不敏感） |
+| POST `concat()` 小写 | 403 | ✅ 403 | POST body 检测（大小写不敏感） |
+| POST NoSQL `$eq()` | 403 | ✅ 403 | POST body 检测 |
+| 正常 POST（不命中） | 200 | ✅ 200 | 关键词预过滤跳过正则 |
 | .txt 文件上传 | 非403 | ✅ 200 | 正常文件放行 |
 | .sql 文件上传 | 403 | ✅ 403 | 文件扩展名检测 |
 | .htaccess 文件上传 | 403 | ✅ 403 | 文件扩展名检测 |
@@ -524,9 +533,9 @@ caddyguard/
 ├── handler.go             # 检测链编排 + WAF 响应输出
 ├── config.go              # Config 结构体定义
 ├── domain.go              # 域名级配置查找（预合并缓存）
-├── rules.go               # 规则缓存 + 热加载 + 配置预合并
+├── rules.go               # 规则缓存 + 热加载 + 配置预合并 + 关键词自动提取
 ├── adapter.go             # caddyguardfile 适配器（全局自动注入 Guard handler）
-├── matcher.go             # 正则匹配引擎（预编译 + (?i) 大小写不敏感 + []byte 直接匹配）
+├── matcher.go             # 正则匹配引擎（预编译 + (?i) 大小写不敏感 + []byte 直接匹配 + 关键词预过滤）
 ├── storage.go             # CC 存储（64 分片 + 滑动窗口 + 内存上限）
 ├── logger.go              # 异步日志（buffered channel + worker）
 ├── request_context.go     # 请求上下文缓存（clientIP, URI）
@@ -535,13 +544,14 @@ caddyguard/
 ├── detector_url.go        # URL 路径 + URL 参数检测
 ├── detector_ua.go         # User-Agent 检测（黑名单 + 白名单）
 ├── detector_cookie.go     # Cookie 注入检测
-├── detector_post.go       # POST body 检测（关键词预过滤 + 跳过 multipart + []byte 直接匹配）
+├── detector_post.go       # POST body 检测（跳过 multipart + []byte 直接匹配 + 关键词预过滤内置 matchRulesBytes）
 ├── detector_cc.go         # CC 攻击检测（64 分片滑动窗口）
 ├── detector_referer.go    # Referer 检测
 ├── detector_fileupload.go # 文件上传扩展名检测
 ├── module_test.go         # 适配器单元测试
 ├── ip_test.go             # IP 匹配单元测试（IPv4/IPv6 CIDR/glob/精确）
 ├── servehttp_test.go      # ServeHTTP 集成测试
+├── keyword_test.go        # 关键词提取与预过滤单元测试
 ├── bench_test.go          # Go benchmark 测试
 ├── rule-config/           # 规则配置文件
 │   ├── config.json        # 全局 WAF 配置

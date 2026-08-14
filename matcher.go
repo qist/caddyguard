@@ -1,6 +1,7 @@
 package caddyguard
 
 import (
+	"bytes"
 	"regexp"
 	"strings"
 	"sync"
@@ -8,9 +9,10 @@ import (
 
 // RuleEntry 规则条目：加载阶段预编译正则，请求阶段零编译开销
 type RuleEntry struct {
-	Raw     string         // 原始规则文本
-	Regex   *regexp.Regexp // 预编译后的正则（大小写敏感）
-	RegexCI *regexp.Regexp // 预编译后的正则（大小写不敏感，(?i) 前缀）
+	Raw      string         // 原始规则文本
+	Regex    *regexp.Regexp // 预编译后的正则（大小写敏感）
+	RegexCI  *regexp.Regexp // 预编译后的正则（大小写不敏感，(?i) 前缀）
+	Keywords [][]byte        // 从正则中提取的字面量关键词，用于快速预过滤
 }
 
 // matchRules 将输入与预编译规则列表逐一匹配
@@ -39,12 +41,46 @@ func matchRules(input string, rules []RuleEntry, caseInsensitive bool) *RuleEntr
 // matchRulesBytes is the allocation-free equivalent of matchRules for request
 // bodies. regexp.Regexp can match []byte directly, so callers do not need to
 // convert a potentially large body to string before scanning it.
+//
+// 关键词预过滤：当规则有 Keywords 时，先对 body 做一次 bytes.ToLower，
+// 然后用 bytes.Contains 检查是否包含任何关键词（关键词也存小写）。
+// 不包含任何关键词 → 跳过该规则的正则匹配。
+// 正则匹配：caseInsensitive 时用 RegexCI（(?i) 前缀）匹配原始 input，
+// 保证大小写混合的规则（如 CONCAT\(）能正确匹配。
 func matchRulesBytes(input []byte, rules []RuleEntry, caseInsensitive bool) *RuleEntry {
 	if len(input) == 0 || len(rules) == 0 {
 		return nil
 	}
 
+	// 延迟初始化 lowered body：只在有规则需要关键词预过滤时才分配
+	var lowered []byte
+	needLower := false
 	for i := range rules {
+		if len(rules[i].Keywords) > 0 {
+			needLower = true
+			break
+		}
+	}
+	if needLower {
+		lowered = bytes.ToLower(input)
+	}
+
+	for i := range rules {
+		// 关键词预过滤：如果 body 不包含任何关键词，跳过正则匹配
+		if len(rules[i].Keywords) > 0 {
+			hit := false
+			for _, kw := range rules[i].Keywords {
+				if bytes.Contains(lowered, kw) {
+					hit = true
+					break
+				}
+			}
+			if !hit {
+				continue
+			}
+		}
+
+		// 正则匹配：caseInsensitive 用 RegexCI 匹配原始 input
 		re := rules[i].Regex
 		if caseInsensitive {
 			re = rules[i].RegexCI

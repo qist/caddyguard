@@ -1,6 +1,7 @@
 package caddyguard
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"regexp"
@@ -158,7 +159,7 @@ func (rc *RuleCache) loadCached(filepath string) ([]RuleEntry, bool) {
 }
 
 // parseAndCompileRules 按行解析规则文件，空行跳过
-// 每条规则在加载阶段预编译为 *regexp.Regexp
+// 每条规则在加载阶段预编译为 *regexp.Regexp，并提取字面量关键词用于预过滤
 // 编译失败的规则跳过
 func parseAndCompileRules(content string) []RuleEntry {
 	var rules []RuleEntry
@@ -174,14 +175,193 @@ func parseAndCompileRules(content string) []RuleEntry {
 		}
 		// 预编译大小写不敏感版本（(?i) 前缀）
 		reCI, _ := compileRegex("(?i)" + line)
+		// 提取字面量关键词用于快速预过滤
+		keywords := extractKeywords(line)
 		rules = append(rules, RuleEntry{
-			Raw:     line,
-			Regex:   re,
-			RegexCI: reCI,
+			Raw:      line,
+			Regex:    re,
+			RegexCI:  reCI,
+			Keywords: keywords,
 		})
 	}
 
 	return rules
+}
+
+// extractKeywords 从正则表达式中提取字面量关键词
+// 用于 bytes.Contains 预过滤：如果输入不包含任何关键词，
+// 则不可能命中该正则，可直接跳过。
+//
+// 算法：逐字符扫描正则，跳过元字符和量词，
+// 收集连续的字面量子串。对于交替组 (a|b|c)，
+// 递归提取每个分支作为独立关键词。
+// 过滤掉长度 < 2 的关键词（太短会误判）。
+func extractKeywords(pattern string) [][]byte {
+	// 去掉前缀 (?i) 等
+	cleaned := stripRegexFlags(pattern)
+	keywords := extractKeywordsRecursive(cleaned)
+
+	// 过滤：长度 < 2 的关键词没有预过滤价值
+	// 同时去重
+	seen := make(map[string]bool)
+	var result [][]byte
+	for _, kw := range keywords {
+		if len(kw) < 2 {
+			continue
+		}
+		// 转小写用于去重（因为 matchRulesBytes 会先 lowercase body）
+		lower := bytes.ToLower(kw)
+		if seen[string(lower)] {
+			continue
+		}
+		seen[string(lower)] = true
+		result = append(result, lower)
+	}
+	return result
+}
+
+// stripRegexFlags 去掉正则前缀标记如 (?i), (?m), (?s) 等
+func stripRegexFlags(pattern string) string {
+	for strings.HasPrefix(pattern, "(?i)") || strings.HasPrefix(pattern, "(?m)") ||
+		strings.HasPrefix(pattern, "(?s)") || strings.HasPrefix(pattern, "(?x)") {
+		pattern = pattern[4:]
+	}
+	return pattern
+}
+
+// extractKeywordsRecursive 递归提取关键词
+func extractKeywordsRecursive(pattern string) [][]byte {
+	var result [][]byte
+	var buf strings.Builder
+
+	i := 0
+	for i < len(pattern) {
+		c := pattern[i]
+
+		switch c {
+		case '\\':
+			// 转义字符：取下一个字符作为字面量
+			if i+1 < len(pattern) {
+				next := pattern[i+1]
+				// 特殊转义序列：\d, \s, \w, \W, \S, \D, \b, \B, \A, \z, \Z 等是正则元语义
+				if isRegexEscapeClass(next) {
+					// 刷新当前 buffer
+					flushBuilder(&buf, &result)
+					i += 2
+					continue
+				}
+				// 普通转义字符（如 \., \$, \/, \( 等）作为字面量
+				buf.WriteByte(next)
+				i += 2
+				continue
+			}
+			flushBuilder(&buf, &result)
+			i++
+
+		case '(', '[':
+			// 组或字符类开始：刷新当前 buffer
+			flushBuilder(&buf, &result)
+			// 找到匹配的闭括号
+			end := findMatchingBracket(pattern, i)
+			if end > i+1 {
+				inner := pattern[i+1 : end]
+				// 处理非捕获组前缀 (?:
+				inner = strings.TrimPrefix(inner, "?:")
+				// 处理内联标志 (?i:...)
+				for len(inner) > 2 && inner[0] == '?' && (inner[1] == 'i' || inner[1] == 'm' || inner[1] == 's' || inner[1] == 'x') {
+					if inner[2] == ':' {
+						inner = inner[3:]
+					} else {
+						break
+					}
+				}
+				// 如果是字符类 [...]，提取其中的字面量字符
+				if c == '[' {
+					extractCharClassKeywords(inner, &result)
+				} else {
+					// 交替组 (a|b|c)：递归提取每个分支
+					for _, branch := range strings.Split(inner, "|") {
+						result = append(result, extractKeywordsRecursive(branch)...)
+					}
+				}
+			}
+			i = end + 1
+
+		case '.', '*', '+', '?', '^', '$', '|', '{', '}':
+			// 正则元字符：刷新当前 buffer
+			flushBuilder(&buf, &result)
+			i++
+
+		default:
+			// 普通字面量字符
+			buf.WriteByte(c)
+			i++
+		}
+	}
+	flushBuilder(&buf, &result)
+	return result
+}
+
+// isRegexEscapeClass 判断转义字符是否是正则元语义类
+func isRegexEscapeClass(c byte) bool {
+	switch c {
+	case 'd', 'D', 's', 'S', 'w', 'W', 'b', 'B', 'A', 'z', 'Z', 'n', 'r', 't', 'v', 'f', '0':
+		return true
+	}
+	return false
+}
+
+// extractCharClassKeywords 从字符类 [...] 内部提取字面量字符
+// 例如 [a-z0-9_] 不提取（是范围），[abc] 提取 a, b, c
+// 对于我们的场景，字符类通常太宽泛，跳过
+func extractCharClassKeywords(inner string, result *[][]byte) {
+	// 字符类内部通常包含范围如 a-z0-9_，
+	// 这些作为关键词太短或太宽泛，跳过
+	// 但如果包含较长的字面量子串，可以提取
+	var buf strings.Builder
+	for i := 0; i < len(inner); i++ {
+		c := inner[i]
+		if c == '-' && i > 0 && i+1 < len(inner) {
+			// 范围：跳过
+			flushBuilder(&buf, result)
+			i++ // 跳过范围结束字符
+			continue
+		}
+		if c == '\\' && i+1 < len(inner) {
+			buf.WriteByte(inner[i+1])
+			i++
+			continue
+		}
+		buf.WriteByte(c)
+	}
+	flushBuilder(&buf, result)
+}
+
+// findMatchingBracket 找到匹配的闭括号位置
+func findMatchingBracket(pattern string, start int) int {
+	depth := 0
+	for i := start; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '(', '[':
+			depth++
+		case ')', ']':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		case '\\':
+			i++ // 跳过转义
+		}
+	}
+	return len(pattern) - 1 // 兜底
+}
+
+// flushBuilder 将 builder 中的内容作为关键词加入 result
+func flushBuilder(buf *strings.Builder, result *[][]byte) {
+	if buf.Len() > 0 {
+		*result = append(*result, []byte(buf.String()))
+		buf.Reset()
+	}
 }
 
 // compileRegex 编译正则（统一入口，便于后续切换 regexp2）
