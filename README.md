@@ -6,6 +6,7 @@ Caddy v2 WAF (Web Application Firewall) 插件 — 用 Go 原生编写，为 Cad
 
 - **全局自动生效**：全局配置一次 `rule_dir`，所有站点自动启用 WAF，无需每个站点单独写 `caddyguard` 指令（通过 `caddyguardfile` 适配器实现）
 - **12 项检测链**：白名单 IP/URL/UA、黑名单 IP、CC 攻击防护、URL 路径/参数检测、User-Agent/Cookie/Referer 检测、POST body 检测、文件上传扩展名检测
+- **IPv4/IPv6 双栈**：IP 黑白名单同时支持 IPv4 和 IPv6，支持 CIDR 表示法（`192.168.1.0/24`、`2001:db8::/32`）、glob 通配符（`192.168.*.*`、`2001:db8::*`）和精确匹配
 - **高性能**：正则预编译（含 `(?i)` 大小写不敏感版本）+ 64 分片 CC 存储 + Config 预合并缓存，WAF 开启仅 ~7% 性能开销
 - **热加载**：规则和配置文件修改后 2 秒内自动生效，无需重启 Caddy
 - **域名级配置**：支持全局配置 + 按域名覆盖（精确匹配 + 通配符）+ 域名级独立规则目录
@@ -16,8 +17,9 @@ Caddy v2 WAF (Web Application Firewall) 插件 — 用 Go 原生编写，为 Cad
 
 ### 前置要求
 
-- Go 1.21+
+- Go 1.22+
 - [xcaddy](https://github.com/caddyserver/xcaddy) 构建工具
+- Caddy v2.10.1+（go.mod 最低依赖 v2.10.1，兼容 v2.10.1 ~ v2.11.4）
 
 ```bash
 # 安装 xcaddy
@@ -232,6 +234,28 @@ bingbot
 YandexBot
 ```
 
+### IP 黑白名单规则格式
+
+`whiteip.rule` 和 `blackip.rule` 每行一条 IP 规则，支持三种格式：
+
+```
+# 1. CIDR 表示法（推荐，IPv4/IPv6 均支持）
+192.168.1.0/24          # IPv4 CIDR
+2001:db8::/32           # IPv6 CIDR
+10.0.0.0/8              # IPv4 大范围
+::1/128                 # IPv6 loopback
+
+# 2. glob 通配符
+192.168.1.*             # IPv4 通配符
+2001:db8::*             # IPv6 通配符
+192.168.*.*             # 多段通配符
+
+# 3. 精确匹配
+8.8.8.8                 # IPv4 精确
+2001:db8::5             # IPv6 精确
+::1                     # IPv6 loopback
+```
+
 ### 三种白名单的区别
 
 | 白名单 | 文件 | 行为 | 说明 |
@@ -363,6 +387,10 @@ CaddyGuard 支持规则和配置的热加载：
 | 二进制垃圾数据 | ✅ | 未崩溃 |
 | 1000 个 Cookie | ✅ | 未崩溃 |
 | 16 种攻击拦截 | ✅ | 全部正确拦截 (403) |
+| IPv4 黑名单 CIDR 拦截 | ✅ | 192.168.1.0/24 正确拦截 (403) |
+| IPv6 黑名单 CIDR 拦截 | ✅ | 2001:db8::/32 正确拦截 (403) |
+| IPv4 白名单放行 | ✅ | 8.8.8.8 跳过所有检测 (200) |
+| IPv6 白名单放行 | ✅ | ::1 / 2001:db8::5 跳过所有检测 (200) |
 
 ### 攻击拦截测试详情
 
@@ -459,8 +487,10 @@ caddyguard/
 ├── storage.go             # CC 存储（64 分片 + 滑动窗口 + 内存上限）
 ├── logger.go              # 异步日志（buffered channel + worker）
 ├── request_context.go     # 请求上下文缓存（clientIP, URI）
-├── detector_*.go          # 各检测器实现
+├── detector_ip.go         # IP 黑白名单检测（IPv4/IPv6 CIDR + glob + 精确匹配）
+├── detector_*.go          # 其他检测器实现（URL/UA/Cookie/POST 等）
 ├── module_test.go         # 适配器单元测试
+├── ip_test.go             # IP 匹配单元测试（IPv4/IPv6 CIDR/glob/精确）
 ├── bench_test.go          # Go benchmark 测试
 ├── rule-config/           # 规则配置文件
 │   ├── config.json        # 全局 WAF 配置

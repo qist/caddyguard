@@ -71,9 +71,11 @@ func matchRegex(text, pattern string, caseInsensitive bool) bool {
 var globEscapeRe = regexp.MustCompile(`([.+?[\](){}$^])`)
 
 // globToRegex 将 glob 通配符转为正则
-// 192.168.0.* → ^192\.168\.0\.\d+$
-// 192.168.*.1 → ^192\.168\.\d+\.1$
-// 无 * 则原样返回
+// 支持 IPv4 和 IPv6 通配符：
+//   192.168.0.*  → ^192\.168\.0\.[0-9a-fA-F:]+$   (IPv4)
+//   2001:db8::*  → ^2001:db8::[0-9a-fA-F:]+$       (IPv6)
+//   192.168.*.* → ^192\.168\.[0-9a-fA-F:]+\.[0-9a-fA-F:]+$
+// 无 * 则原样返回（视为正则）
 func globToRegex(pattern string) string {
 	if !strings.Contains(pattern, "*") {
 		return pattern // 已是正则
@@ -82,7 +84,7 @@ func globToRegex(pattern string) string {
 	regex := globEscapeRe.ReplaceAllStringFunc(pattern, func(s string) string {
 		return "\\" + s
 	})
-	// * → \d+
-	regex = strings.ReplaceAll(regex, "*", `\d+`)
+	// * → [0-9a-fA-F:]+  （匹配 IPv4 数字、IPv6 十六进制和冒号）
+	regex = strings.ReplaceAll(regex, "*", `[0-9a-fA-F:]+`)
 	return "^" + regex + "$"
 }
