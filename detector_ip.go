@@ -40,34 +40,35 @@ func ipMatch(clientIP, rule string) bool {
 
 // whiteIPCheck 白名单 IP 检测
 // 命中白名单 → 跳过所有检测
+// 使用预编译 IP 规则缓存（CIDR 排序+二分搜索），对应 nginxguard 的 match_ip_rule
 func (g *Guard) whiteIPCheck(r *http.Request, cfg Config) bool {
 	if cfg.WhiteIPCheck != "on" {
 		return false
 	}
 	clientIP := g.getClientIPCached(r, cfg)
-	rules := g.ruleCache.GetRule("whiteip.rule", cfg.RuleDir)
-	for _, rule := range rules {
-		if ipMatch(clientIP, rule.Raw) {
-			return true
-		}
+	compiled := g.getCompiledIPRules("whiteip.rule", cfg.RuleDir)
+	if compiled == nil {
+		return false
 	}
-	return false
+	return compiled.match(clientIP)
 }
 
 // blackIPCheck 黑名单 IP 检测
 // 命中 → 拦截
+// 使用预编译 IP 规则缓存（CIDR 排序+二分搜索），对应 nginxguard 的 match_ip_rule
 func (g *Guard) blackIPCheck(w http.ResponseWriter, r *http.Request, cfg Config) bool {
 	if cfg.BlackIPCheck != "on" {
 		return false
 	}
 	clientIP := g.getClientIPCached(r, cfg)
-	rules := g.ruleCache.GetRule("blackip.rule", cfg.RuleDir)
-	for _, rule := range rules {
-		if ipMatch(clientIP, rule.Raw) {
-			g.logger.Record("BlackIP", reqURICached(r), "", rule.Raw, clientIP, r, cfg)
-			g.wafOutput(w, cfg)
-			return true
-		}
+	compiled := g.getCompiledIPRules("blackip.rule", cfg.RuleDir)
+	if compiled == nil {
+		return false
+	}
+	if compiled.match(clientIP) {
+		g.logger.Record("BlackIP", reqURICached(r), "", "ip_rule_match", clientIP, r, cfg)
+		g.wafOutput(w, cfg)
+		return true
 	}
 	return false
 }

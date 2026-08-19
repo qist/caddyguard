@@ -414,39 +414,84 @@ CaddyGuard 支持规则和配置的热加载：
 
 ### 环境信息
 
-- **测试机**：物理机（4 核 CPU）
+- **测试机**：物理机（4 核 CPU），192.168.2.180
 - **发包机**：Apache Bench (ab)，本机回环
-- **参数**：50000 请求，200 并发
+- **参数**：50000 请求，200 并发，Keep-Alive
+- **日期**：2026-08-19（优化后）
 
 ### 压测对比
 
 | 场景 | req/s | P99 | 开销 | 说明 |
 |------|-------|-----|------|------|
-| Caddy + reverse_proxy（无 WAF） | 6,446 | 71ms | 基准 | 无 WAF 的 Caddy 反向代理 |
-| CaddyGuard 规则全关 | 6,413 | 71ms | ~0% | WAF 开启但所有规则关闭 |
-| CaddyGuard 规则全开（不含 CC） | 5,713 | 79ms | ~11% | 12 项检测全开 + 关键词预过滤 |
-| CaddyGuard + CC | 5,729 | 80ms | ~11% | 含 CC 实时计数 |
-| CaddyGuard + POST body | 4,991 | 93ms | ~23% | POST body 读取 + 关键词预过滤 + 正则匹配 |
-| 路径级 WAF off（webhook） | 10,554 | 23ms | — | waf_enable off 路径直返 |
-| 路径级 WAF on（同配置） | 10,636 | 27ms | — | 同配置 WAF on 路径对比 |
+| Caddy + reverse_proxy（无 WAF） | 6,329 | 73ms | 基准 | 无 WAF 的 Caddy 反向代理 |
+| CaddyGuard 规则全关 | 6,405 | 70ms | ~0% | WAF 开启但所有规则关闭 |
+| CaddyGuard 规则全开（不含 CC） | 6,223 | 73ms | ~1.7% | 12 项检测全开 + 关键词预过滤 + 匹配缓存 |
+| CaddyGuard 攻击 UA 拦截 | 11,027 | 21ms | — | UA 命中直接 403，不走后端 |
+| CaddyGuard + POST body | 5,363 | 86ms | ~15% | POST body 读取 + Content-Type 分流 + 关键词预过滤 |
+| 路径级 WAF off（webhook） | 10,765 | 22ms | — | waf_enable off 路径直返 |
+| 路径级 WAF on（同配置） | 10,739 | 23ms | — | 同配置 WAF on 路径对比 |
 
-> 测试参数：50000 请求，200 并发，本机回环。P99 为 99% 请求延迟。
+> WAF 全开吞吐下降仅 1.7%（6,223 vs 6,329）。相比优化前（11.4%），性能损耗大幅缩减。
 
 ### 单项检测性能对比
 
 | 检测项 | req/s | P99 | vs 基准 | 说明 |
 |--------|-------|-----|---------|------|
-| 无 WAF 基准 | 6,446 | 71ms | — | Caddy + reverse_proxy |
-| 仅 URL 检测 | 6,373 | 73ms | -1.1% | URL 路径 regex |
-| URL + 参数检测 | 6,386 | 72ms | -0.9% | URL + 参数 regex |
-| 仅 UA 检测 | 5,881 | 76ms | -8.8% | Header 读取 + regex |
-| 仅 Cookie 检测 | 6,382 | 71ms | -1.0% | Header 读取 + regex |
-| 仅 IP 黑白名单 | 6,336 | 71ms | -1.7% | CIDR/glob/精确匹配 |
-| 仅 CC 检测 | 6,346 | 70ms | -1.5% | 64 分片 map 计数 |
-| 仅 POST body | 5,587 | 79ms | -13.3% | body I/O + 关键词预过滤 + regex |
-| 仅白名单 | 6,359 | 68ms | -1.4% | IP/URL/UA 白名单 |
+| 无 WAF 基准 | 6,329 | 73ms | — | Caddy + reverse_proxy |
+| 仅 URL 检测 | 6,332 | 70ms | -0.04% | URL 路径 regex |
+| URL + 参数检测 | 6,400 | 67ms | +1.1% | URL + 参数 regex |
+| 仅 UA 检测 | 6,408 | 71ms | +1.2% | Bloom-filter 预检 + 空规则短路 |
+| 仅 Cookie 检测 | 6,450 | 69ms | +1.9% | Header 读取 + 空规则短路 |
+| 仅 IP 黑白名单 | 6,238 | 72ms | -1.4% | CIDR/glob/精确匹配 |
+| 仅 POST body | 5,536 | 78ms | -12.5% | body I/O + Content-Type 分流 + 关键词预过滤 |
+| 仅白名单 | 6,222 | 70ms | -1.7% | IP/URL/UA 白名单 |
 
-> POST body 检测使用自动关键词预过滤：加载阶段从每条正则规则中自动提取字面量关键词，请求阶段先做 bytes.Contains 检查（SIMD 优化），不包含任何关键词的 body 直接跳过全部正则。剩余开销来自 Caddy 框架的 body I/O（读取 + 恢复 + reverse_proxy 二次读取），非 WAF 逻辑本身。
+> POST body 检测使用自动关键词预过滤：加载阶段从每条正则规则中自动提取字面量关键词，请求阶段先做 bytes.Contains 检查（SIMD 优化），不包含任何关键词的 body 直接跳过全部正则。form-urlencoded 请求通过 ParseQuery 解析 key/value 后跳过 raw body 二次扫描。剩余开销来自 Caddy 框架的 body I/O（读取 + 恢复 + reverse_proxy 二次读取），非 WAF 逻辑本身。
+
+### 并发梯度测试（WAF 全开，不含 CC）
+
+| 并发 | req/s | P99 | 说明 |
+|-------|-------|-----|------|
+| c=10 | 6,085 | 5ms | 低并发延迟极低 |
+| c=50 | 6,555 | 18ms | |
+| c=100 | 6,343 | 35ms | |
+| c=200 | 6,275 | 72ms | 标准压测并发 |
+| c=500 | 5,507 | 172ms | 高并发开始排队 |
+
+### CC 防护测试
+
+| 场景 | req/s | Fail | 说明 |
+|------|-------|------|------|
+| 100 请求 / c=10 | 6,229 | 0 | 不触发 CC，全部放行 |
+| 50000 请求 / c=200 | 10,702 | 49,951 | 150/60s 触发封禁，后续全部 403 |
+
+### 性能优化措施
+
+| 优化项 | 说明 |
+|--------|------|
+| 规则双引擎 | 纯字符串规则用 strings.Contains（快 10x），正则规则用预编译 *regexp.Regexp |
+| 关键词预过滤 | 加载阶段从正则提取字面量关键词，请求阶段 bytes.Contains 预检跳过不匹配的正则 |
+| worker 级匹配缓存 | 小输入（≤512字节）按规则集+input 做全局缓存，重复请求直接复用结果（上限 4096 条） |
+| POST Content-Type 分流 | form-urlencoded 走 ParseQuery 解析 key/value 后跳过 raw body 二次扫描；JSON/XML 直接走 raw body |
+| 空规则提前返回 | 各检测函数获取规则后立即判断空规则，避免无意义的 header/body 读取 |
+| UA bloom-filter 预检 | 7 个 bot 标记词预过滤，99% 正常流量跳过白名单遍历 |
+| URL 参数短路 | 无查询参数时直接返回，跳过 pairs 循环和正则匹配 |
+| 最小输入长度检查 | 输入 < 2 字符直接跳过规则匹配 |
+| 白名单 URL 路径优先 | 先匹配 URI path（常见场景），再匹配完整 request_uri（兼容含 query 的白名单） |
+| 请求类型短路 | GET/HEAD/OPTIONS/DELETE 跳过 POST 和文件上传检测 |
+| Cookie 检测后移 | Cookie 检测移到 URL/Args 之后，攻击请求在 URL 阶段即短路返回 |
+| IP 预编译缓存 | CIDR 排序 + 二分搜索 + 精确 IP hash 查找 |
+| 配置预合并 | 域名级配置在加载阶段预合并，请求阶段 O(1) 查找 |
+| 请求上下文缓存 | clientIP 和 URI 在 context 中缓存，同请求内不重复计算 |
+
+### 优化前后对比
+
+| 场景 | 优化前 req/s | 优化后 req/s | 提升 |
+|------|------------|------------|------|
+| WAF 全开（不含 CC） | 5,713 | 6,223 | **+8.9%** |
+| WAF + POST body | 4,991 | 5,363 | **+7.4%** |
+| 仅 UA 检测 | 5,881 | 6,408 | **+9.0%** |
+| WAF 全开 vs 无 WAF 开销 | ~11% | ~1.7% | **降低 85%** |
 
 ### Go Benchmark 微基准
 
@@ -454,7 +499,7 @@ CaddyGuard 支持规则和配置的热加载：
 |------|------|------|
 | CC Incr (64 分片并行) | 67 ns/op | 无锁竞争 |
 | CC IsBanned (并行) | 25 ns/op | 分片读锁 |
-| matchRules (大小写不敏感) | 2.2 ns/op | ToLower 只做一次 |
+| matchRules (大小写不敏感) | 2.2 ns/op | ToLower 只做一次 + worker 缓存 |
 | GetEffectiveConfig | 1,474 ns/op | 预合并缓存 O(1) |
 | runChecks (正常请求) | 6,431 ns/op | 12 项检测全通过 |
 

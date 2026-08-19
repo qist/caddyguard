@@ -161,6 +161,13 @@ func (rc *RuleCache) loadCached(filepath string) ([]RuleEntry, bool) {
 // parseAndCompileRules 按行解析规则文件，空行跳过
 // 每条规则在加载阶段预编译为 *regexp.Regexp，并提取字面量关键词用于预过滤
 // 编译失败的规则跳过
+// hasRegexMetachar 检查规则是否包含正则元字符
+// 不含元字符的纯字符串规则可以用 strings.Contains 做子串匹配，快 10 倍+
+// 对应 Lua 的 dual-engine 分离逻辑
+func hasRegexMetachar(s string) bool {
+	return strings.ContainsAny(s, `()%.[]{}*+?^$|\`)
+}
+
 func parseAndCompileRules(content string) []RuleEntry {
 	var rules []RuleEntry
 	for _, line := range strings.Split(content, "\n") {
@@ -168,6 +175,9 @@ func parseAndCompileRules(content string) []RuleEntry {
 		if line == "" {
 			continue
 		}
+		// 判断是否是纯字符串规则（不含正则元字符）
+		isPlain := !hasRegexMetachar(line)
+
 		// 预编译正则（大小写敏感模式）
 		re, err := compileRegex(line)
 		if err != nil {
@@ -182,6 +192,7 @@ func parseAndCompileRules(content string) []RuleEntry {
 			Regex:    re,
 			RegexCI:  reCI,
 			Keywords: keywords,
+			IsPlain:  isPlain,
 		})
 	}
 

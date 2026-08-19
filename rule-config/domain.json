@@ -1,5 +1,5 @@
 {
-    "_comment": "域名级规则配置文件。只配置需要覆盖全局(config.json)的域名。未配置的域名走 config.json 全局配置；域名中未指定的项也回退到全局。支持通配符域名如 *.example.com。路径级 WAF 开关请使用 Caddy 原生 path matcher 配合 caddyguard waf_enable off。",
+    "_comment": "域名级规则配置文件。只配置需要覆盖全局(config.lua)的域名。未配置的域名走 config.lua 全局配置；域名中未指定的项也回退到全局。支持通配符域名如 *.example.com",
 
     "www.example.com": {
         "url_check": "off",
@@ -8,6 +8,7 @@
     },
 
     "api.example.com": {
+        "_comment": "示例：如需对API域名关闭WAF，取消下面一行的注释。注意：关闭WAF将跳过所有安全检查",
         "waf_enable": "off"
     },
 

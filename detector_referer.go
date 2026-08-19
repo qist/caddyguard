@@ -11,13 +11,13 @@ func (g *Guard) refererCheck(w http.ResponseWriter, r *http.Request, cfg Config)
 		return false
 	}
 
-	referer := r.Header.Get("Referer")
-	if referer == "" {
+	rules := g.ruleCache.GetRule("referer.rule", cfg.RuleDir)
+	if len(rules) == 0 {
 		return false
 	}
 
-	rules := g.ruleCache.GetRule("referer.rule", cfg.RuleDir)
-	if rules == nil {
+	referer := r.Header.Get("Referer")
+	if referer == "" {
 		return false
 	}
 

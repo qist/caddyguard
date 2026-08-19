@@ -14,12 +14,22 @@ UA="User-Agent: Mozilla/5.0"
 RESULT_FILE="/tmp/bench_results.txt"
 > $RESULT_FILE
 
-stop_caddy() {
-    pkill -f 'caddy run' 2>/dev/null
-    sleep 1
+stop_test_caddy() {
+    # 只杀监听 8888 端口的 caddy 进程，不影响 backend(8080)
+    pids=$(ss -tlnp | grep ':8888 ' | grep -oP 'pid=\K[0-9]+' | sort -u)
+    if [ -n "$pids" ]; then
+        echo "$pids" | xargs kill 2>/dev/null
+        sleep 1
+    fi
 }
 
 start_backend() {
+    # 检查 backend 是否已在运行
+    code=$(curl -s -m 2 -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/ 2>/dev/null)
+    if [ "$code" = "200" ]; then
+        echo "Backend: already running (HTTP 200)"
+        return 0
+    fi
     nohup $CADDY run --config $CONF_DIR/Caddyfile.backend --adapter caddyfile > /tmp/caddy_backend.log 2>&1 &
     sleep 1
     code=$(curl -s -m 3 -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/)
@@ -29,7 +39,7 @@ start_backend() {
 start_test() {
     local caddyfile="$1"
     local adapter="${2:-caddyguardfile}"
-    stop_caddy
+    stop_test_caddy
     start_backend
     nohup $CADDY run --config "$caddyfile" --adapter "$adapter" > $LOG_FILE 2>&1 &
     sleep 2
@@ -129,7 +139,7 @@ FAIL=$(grep "Failed requests" /tmp/ab_E.txt | awk '{print $3}')
 P99=$(grep "99%" /tmp/ab_E.txt | awk '{print $2}')
 echo "E: WAF+log(attack): RPS=$RPS TPR=${TPR}ms Failed=$FAIL P99=${P99}ms"
 echo "E: WAF+log(attack): RPS=$RPS TPR=${TPR}ms Failed=$FAIL P99=${P99}ms" >> $RESULT_FILE
-LOG_COUNT=$(wc -l < /var/log/caddyguard/*_waf.log 2>/dev/null || echo 0)
+LOG_COUNT=$(cat /var/log/caddyguard/*_waf.log 2>/dev/null | wc -l)
 echo "  WAF log entries: $LOG_COUNT" >> $RESULT_FILE
 
 # ==========================================
@@ -155,5 +165,10 @@ echo "========================================"
 cat $RESULT_FILE
 echo "========================================"
 
-stop_caddy
+stop_test_caddy
+# 也关闭 backend
+pids=$(ss -tlnp | grep ':8080 ' | grep -oP 'pid=\K[0-9]+' | sort -u)
+if [ -n "$pids" ]; then
+    echo "$pids" | xargs kill 2>/dev/null
+fi
 echo "All done!"

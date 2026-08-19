@@ -1,0 +1,23 @@
+{
+	auto_https off
+	caddyguard {
+		rule_dir /opt/caddyguard/rule-config
+	}
+}
+
+:8888 {
+	log {
+		output stdout
+		format json
+	}
+
+	# 路径级 WAF 开关测试
+	@nowaf path /api/webhook /api/webhook/*
+	route @nowaf {
+		caddyguard waf_enable off
+		respond "webhook-ok" 200
+	}
+
+	# 默认路由（走 WAF）
+	reverse_proxy 127.0.0.1:8889
+}

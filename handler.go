@@ -5,69 +5,95 @@ import (
 )
 
 // runChecks 执行检测链
-// 优化：按检测成本从低到高排序，昂贵的 body 读取检测放最后
-// 1. WAF off? → 在 ServeHTTP 中已检查
-// 2. 白名单 IP → 放行（仅 map/regex 匹配，无 IO）
-// 3. 白名单 URL → 放行（仅 regex 匹配）
-// 4. 动态黑名单（CC 自动拉黑，仅 map 查找）
-// 5. 静态黑名单 IP（仅 regex 匹配）
-// 6. CC 攻击检测（map 查找 + 计数）
-// 7. User-Agent 检测（header 读取 + regex）
-// 8. URL 路径检测（regex）
-// 9. URL 参数检测（regex，需 parse query）
-// 10. Cookie 检测（header 读取 + regex）
-// 11. Referer 检测（header 读取 + regex）
-// 12. POST 检测（body 读取 + regex，最昂贵）
-// 13. 文件上传检测（multipart 解析 + regex，最昂贵）
+// 对应 Lua access.lua 的 waf_main 函数
+//
+// 检测顺序（与 nginxguard 完全一致）：
+//  1. 白名单 IP → 放行
+//  2. 动态黑名单（CC 自动拉黑期内）
+//  3. 静态黑名单 IP
+//  4. 白名单 URL → 放行（跳过后续所有检测）
+//  5. User-Agent 检测（白名单 UA 仅跳过此项）
+//  6. Referer 检测
+//  7. CC 攻击检测
+//  8. [非 bodyless] 文件上传检测
+//  9. URL 路径检测
+// 10. URL 参数检测
+// 11. Cookie 检测
+// 12. [非 bodyless] POST 检测
+//
+// 请求类型分叉（对应 Lua 的 is_bodyless 优化）：
+//   - GET/HEAD/OPTIONS/DELETE → 跳过文件上传和 POST 检测
+//   - POST/PUT/PATCH → 执行全部检测
 func (g *Guard) runChecks(w http.ResponseWriter, r *http.Request, cfg Config) bool {
 	// 1. 白名单 IP → 放行
 	if g.whiteIPCheck(r, cfg) {
 		return false
 	}
-	// 2. 白名单 URL → 放行
-	if g.whiteURLCheck(r, cfg) {
-		return false
-	}
-	// 3. 动态黑名单（CC 自动拉黑）
+
+	// 2. 动态黑名单（CC 自动拉黑期内）
 	if g.dynamicBlackIPCheck(w, r, cfg) {
 		return true
 	}
-	// 4. 静态黑名单 IP
+
+	// 3. 静态黑名单 IP
 	if g.blackIPCheck(w, r, cfg) {
 		return true
 	}
-	// 5. CC 攻击检测
-	if g.ccAttackCheck(w, r, cfg) {
-		return true
+
+	// 4. 白名单 URL → 放行（跳过后续所有检测）
+	// 对应 Lua: if white_url_check() then return end
+	if g.whiteURLCheck(r, cfg) {
+		return false
 	}
-	// 6. User-Agent 检测（白名单 UA 仅跳过此项）
+
+	// 请求类型分叉：GET/HEAD/OPTIONS/DELETE 跳过 body 相关检测
+	// 对应 Lua 的 is_bodyless = (METHOD == "GET" or METHOD == "HEAD" or METHOD == "OPTIONS" or METHOD == "DELETE")
+	method := r.Method
+	isBodyless := method == "GET" || method == "HEAD" || method == "OPTIONS" || method == "DELETE"
+
+	// 5. User-Agent 检测（白名单 UA 仅跳过此项）
 	if g.userAgentAttackCheck(w, r, cfg) {
 		return true
 	}
-	// 7. URL 路径检测
-	if g.urlAttackCheck(w, r, cfg) {
-		return true
-	}
-	// 8. URL 参数检测
-	if g.urlArgsAttackCheck(w, r, cfg) {
-		return true
-	}
-	// 9. Cookie 检测
-	if g.cookieAttackCheck(w, r, cfg) {
-		return true
-	}
-	// 10. Referer 检测
+
+	// 6. Referer 检测
 	if g.refererCheck(w, r, cfg) {
 		return true
 	}
-	// 11. POST 检测（需读取 body，最昂贵）
-	if g.postAttackCheck(w, r, cfg) {
+
+	// 7. CC 攻击检测
+	if g.ccAttackCheck(w, r, cfg) {
 		return true
 	}
-	// 12. 文件上传检测（需解析 multipart，最昂贵）
-	if g.fileUploadCheck(w, r, cfg) {
+
+	// 8. [非 bodyless] 文件上传检测（需解析 multipart，最昂贵）
+	if !isBodyless {
+		if g.fileUploadCheck(w, r, cfg) {
+			return true
+		}
+	}
+
+	// 9-10. URL 路径 + 参数检测
+	if g.urlAttackCheck(w, r, cfg) {
 		return true
 	}
+	if g.urlArgsAttackCheck(w, r, cfg) {
+		return true
+	}
+
+	// 11. Cookie 检测
+	// 对应 Lua：Cookie 检测移到 URL/Args 之后，攻击请求在 URL 阶段即短路返回
+	if g.cookieAttackCheck(w, r, cfg) {
+		return true
+	}
+
+	// 12. [非 bodyless] POST 检测（需读取 body，最昂贵）
+	if !isBodyless {
+		if g.postAttackCheck(w, r, cfg) {
+			return true
+		}
+	}
+
 	return false
 }
 
