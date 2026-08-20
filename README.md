@@ -184,9 +184,10 @@ caddy run --config /etc/caddy/caddy.json
 ├── whiteua.rule             # User-Agent 白名单（搜索引擎蜘蛛）
 ├── whiteurl.rule            # URL 白名单
 ├── blackip.rule             # IP 黑名单
+├── cdnip.rule              # CDN/可信代理 IP 列表（控制 XFF 信任，支持 CIDR）
 ├── fileext.rule             # 文件上传扩展名黑名单
 └── domains/                 # 域名级独立规则目录
-    └── www.example.com/     # 该域名专用规则（12 个 .rule 文件）
+    └── www.example.com/     # 该域名专用规则（13 个 .rule 文件）
         ├── url.rule
         ├── args.rule
         ├── post.rule
@@ -197,7 +198,8 @@ caddy run --config /etc/caddy/caddy.json
         ├── fileext.rule
         ├── whiteip.rule
         ├── whiteurl.rule
-        └── blackip.rule
+        ├── blackip.rule
+        └── cdnip.rule
 ```
 
 ### config.json 参数说明
@@ -205,7 +207,7 @@ caddy run --config /etc/caddy/caddy.json
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `waf_enable` | string | `"on"` | WAF 总开关，`"off"` 完全关闭 |
-| `trust_proxy_headers` | string | `"on"` | 信任 X-Forwarded-For 头获取客户端 IP |
+| `trust_proxy_headers` | string | `"on"` | 是否信任代理转发的 IP 头（X-Forwarded-For 等）。`"on"`=CaddyGuard 在 CDN/反代后，根据 `cdnip.rule` 判断是否信任转发头：`remote_addr` 在 `cdnip.rule` 中才信任 XFF，不在则用 `remote_addr` 防伪造；`cdnip.rule` 不存在或为空则信任所有 XFF（原始方案，存在伪造风险）。`"off"`=CaddyGuard 直接暴露公网，只用 `remote_addr` 防伪造 |
 | `log_dir` | string | `/var/log/caddyguard` | WAF 日志目录 |
 | `url_check` | string | `"on"` | URL 路径检测开关 |
 | `url_args_check` | string | `"on"` | URL 参数检测开关 |
@@ -319,9 +321,9 @@ bingbot
 YandexBot
 ```
 
-### IP 黑白名单规则格式
+### IP 规则文件格式
 
-`whiteip.rule` 和 `blackip.rule` 每行一条 IP 规则，支持三种格式：
+`whiteip.rule`、`blackip.rule` 和 `cdnip.rule` 每行一条 IP 规则，支持三种格式：
 
 ```
 # 1. CIDR 表示法（推荐，IPv4/IPv6 均支持）
@@ -339,6 +341,62 @@ YandexBot
 8.8.8.8                 # IPv4 精确
 2001:db8::5             # IPv6 精确
 ::1                     # IPv6 loopback
+```
+
+### CDN 代理 IP 信任（cdnip.rule）
+
+当 CaddyGuard 部署在 CDN/反向代理后面时，需要从 `X-Forwarded-For` 获取真实客户端 IP。但直接信任 XFF 会让攻击者伪造该头绕过 IP 黑白名单。
+
+解决方案：在 `config.json` 中设置 `trust_proxy_headers = "on"`，并在 `cdnip.rule` 中配置你实际使用的 CDN/代理 IP 段：
+
+```json
+// config.json
+{
+    "trust_proxy_headers": "on"
+}
+```
+
+```bash
+# cdnip.rule
+# 填入你实际使用的 CDN/代理 IP 段，以下为示例（请按需替换）
+# 各家 CDN IP 列表查询地址：
+#   Cloudflare:    https://www.cloudflare.com/ips/
+#   AWS CloudFront: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/LocationsOfEdgeServers.html
+#   Akamai:        https://developer.akamai.com/cli/apps/akamai-cli-list-ip
+#   阿里云 CDN:    https://help.aliyun.com/document_detail/27134.html
+#   腾讯云 CDN:    https://cloud.tencent.com/document/product/228/52935
+
+# Cloudflare IPv4（示例）
+173.245.48.0/20
+104.16.0.0/13
+# Cloudflare IPv6（示例）
+2400:cb00::/32
+2606:4700::/32
+# 内部代理/负载均衡器
+10.0.0.0/8
+192.168.0.0/16
+```
+
+此时 CaddyGuard 的行为：
+
+| 条件 | XFF 处理 | 说明 |
+|------|---------|------|
+| `remote_addr` 在 cdnip.rule 中 | 信任 XFF | 提取真实客户端 IP |
+| `remote_addr` 不在 cdnip.rule 中 | 不信任 XFF | 使用 `remote_addr`（防直连伪造） |
+| `cdnip.rule` 文件不存在 | 信任所有 XFF | 原始行为，向后兼容 |
+| `cdnip.rule` 文件为空（或全注释） | 信任所有 XFF | 等同于文件不存在，回落原始行为 |
+
+支持域名级覆盖：
+
+```json
+{
+    "www.example.com": {
+        "trust_proxy_headers": "on"
+    },
+    "direct.example.com": {
+        "trust_proxy_headers": "off"
+    }
+}
 ```
 
 ### 三种白名单的区别
