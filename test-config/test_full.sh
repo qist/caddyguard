@@ -30,12 +30,13 @@ cp $RULE_DIR/cdnip.rule /tmp/cdnip.rule.bak 2>/dev/null || true
 echo "8.8.4.4" > $RULE_DIR/blackip.rule
 
 cat > $RULE_DIR/config.json << 'EOF'
-{"waf_enable":"on","trust_proxy_headers":"on","log_dir":"/tmp","white_url_check":"on","white_ip_check":"on","white_ua_check":"on","black_ip_check":"on","url_check":"on","url_args_check":"on","user_agent_check":"on","cookie_check":"on","cc_check":"off","cc_rate":"999999/60","cc_block_ttl":0,"post_check":"on","referer_check":"on","file_upload_check":"on","waf_output":"html","waf_redirect_url":""}
+{"waf_enable":"on","trust_proxy_headers":"on","log_dir":"/tmp","white_url_check":"on","white_ip_check":"on","white_ua_check":"on","black_ip_check":"on","url_check":"on","url_args_check":"on","user_agent_check":"on","cookie_check":"on","cc_check":"off","cc_rate":"999999/60","cc_block_ttl":0,"post_check":"on","referer_check":"on","file_upload_check":"on","bodyless":"on","multipart_streaming_check":"off","upload_filename_scan_limit":0,"post_body_scan_limit":2097152,"waf_output":"html","waf_redirect_url":""}
 EOF
 
 nohup $CADDY run --config $CONF_DIR/Caddyfile.backend --adapter caddyfile > /tmp/caddy_backend.log 2>&1 &
 sleep 1
 nohup $CADDY run --config $CONF_DIR/Caddyfile.test --adapter caddyguardfile > /tmp/caddy_waf.log 2>&1 &
+CADDY_WAF_PID=$!
 sleep 3
 
 code=$(curl -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" $TARGET/)
@@ -317,9 +318,78 @@ test_rule "Normal multipart upload" 200 -H "User-Agent: Mozilla/5.0" -F "file=@/
 test_rule "Normal long URL"        200 -H "User-Agent: Mozilla/5.0" "$TARGET/?redirect=https://example.com/return&page=2&sort=desc"
 
 echo ""
-echo "=== 22. CC attack detection ==="
+echo "=== 22. bodyless config test ==="
+# bodyless=on (default): GET/HEAD/OPTIONS skip body/post/file_upload checks
+test_rule "bodyless=on GET normal"    200 -H "User-Agent: Mozilla/5.0" -X GET "$TARGET/"
+test_rule "bodyless=on GET URL attack" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?id=1+union+select"
+test_rule "bodyless=on HEAD normal"   200 -H "User-Agent: Mozilla/5.0" -I "$TARGET/"
+
+# bodyless=off: all methods scan body (GET has no body so still 200, but POST/PUT always scanned)
 cat > $RULE_DIR/config.json << 'EOF'
-{"waf_enable":"on","trust_proxy_headers":"on","log_dir":"/tmp","white_url_check":"on","white_ip_check":"on","white_ua_check":"on","black_ip_check":"on","url_check":"on","url_args_check":"on","user_agent_check":"on","cookie_check":"on","cc_check":"on","cc_rate":"5/60","cc_block_ttl":300,"post_check":"on","referer_check":"off","file_upload_check":"on","waf_output":"html","waf_redirect_url":""}
+{"waf_enable":"on","trust_proxy_headers":"on","log_dir":"/tmp","white_url_check":"on","white_ip_check":"on","white_ua_check":"on","black_ip_check":"on","url_check":"on","url_args_check":"on","user_agent_check":"on","cookie_check":"on","cc_check":"off","cc_rate":"999999/60","cc_block_ttl":0,"post_check":"on","referer_check":"off","file_upload_check":"on","bodyless":"off","multipart_streaming_check":"off","upload_filename_scan_limit":0,"post_body_scan_limit":2097152,"waf_output":"html","waf_redirect_url":""}
+EOF
+sleep 3
+test_rule "bodyless=off GET normal"   200 -H "User-Agent: Mozilla/5.0" -X GET "$TARGET/"
+test_rule "bodyless=off POST attack"  403 -H "User-Agent: Mozilla/5.0" -d "id=1 union select 1" "$TARGET/"
+
+# Restore bodyless=on
+cat > $RULE_DIR/config.json << 'EOF'
+{"waf_enable":"on","trust_proxy_headers":"on","log_dir":"/tmp","white_url_check":"on","white_ip_check":"on","white_ua_check":"on","black_ip_check":"on","url_check":"on","url_args_check":"on","user_agent_check":"on","cookie_check":"on","cc_check":"off","cc_rate":"999999/60","cc_block_ttl":0,"post_check":"on","referer_check":"on","file_upload_check":"on","bodyless":"on","multipart_streaming_check":"off","upload_filename_scan_limit":0,"post_body_scan_limit":2097152,"waf_output":"html","waf_redirect_url":""}
+EOF
+sleep 3
+
+echo ""
+echo "=== 23. Log truncation test ==="
+# Ensure config has log_dir=/tmp and cc_check=off (restore from bodyless test)
+cat > $RULE_DIR/config.json << 'EOF'
+{"waf_enable":"on","trust_proxy_headers":"on","log_dir":"/tmp","white_url_check":"on","white_ip_check":"on","white_ua_check":"on","black_ip_check":"on","url_check":"on","url_args_check":"on","user_agent_check":"on","cookie_check":"on","cc_check":"off","cc_rate":"999999/60","cc_block_ttl":0,"post_check":"on","referer_check":"off","file_upload_check":"on","bodyless":"on","multipart_streaming_check":"off","upload_filename_scan_limit":0,"post_body_scan_limit":2097152,"waf_output":"html","waf_redirect_url":""}
+EOF
+sleep 3
+# Send a very long URL that triggers WAF, verify log field is truncated to 4096 bytes
+LONG_ATTACK=$(python3 -c "print('a'*10000 + '+union+select+1')")
+LOGFILE="/tmp/$(date +%Y-%m-%d)_waf.log"
+# Record line count before attack
+LINES_BEFORE=$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)
+code=$(curl -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" "$TARGET/?id=${LONG_ATTACK}")
+sleep 1
+if [ "$code" = "403" ] && [ -f "$LOGFILE" ]; then
+    # Get the last log line (the attack we just sent)
+    REQ_URL_LEN=$(tail -1 "$LOGFILE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('req_url','')))" 2>/dev/null)
+    if [ -n "$REQ_URL_LEN" ] && [ "$REQ_URL_LEN" -le 4120 ]; then
+        printf "  PASS  %-45s (url_len=%s, max=4120)\n" "Log truncation 4096" "$REQ_URL_LEN"; PASS=$((PASS+1))
+    else
+        printf "  FAIL  %-45s (url_len=%s, max=4120)\n" "Log truncation 4096" "${REQ_URL_LEN:-N/A}"; FAIL=$((FAIL+1))
+        ERRORS="$ERRORS\n  Log truncation: url_len=${REQ_URL_LEN:-N/A}"
+    fi
+else
+    printf "  FAIL  %-45s (code=%s, log=%s)\n" "Log truncation 4096" "$code" "$([ -f $LOGFILE ] && echo exists || echo missing)"; FAIL=$((FAIL+1))
+    ERRORS="$ERRORS\n  Log truncation: code=$code, logfile=$LOGFILE"
+fi
+
+echo ""
+echo "=== 24. cc_rate invalid config error log ==="
+cat > $RULE_DIR/config.json << 'EOF'
+{"waf_enable":"on","trust_proxy_headers":"on","log_dir":"/tmp","white_url_check":"on","white_ip_check":"on","white_ua_check":"on","black_ip_check":"on","url_check":"on","url_args_check":"on","user_agent_check":"on","cookie_check":"on","cc_check":"on","cc_rate":"invalid","cc_block_ttl":300,"post_check":"on","referer_check":"off","file_upload_check":"on","bodyless":"on","waf_output":"html","waf_redirect_url":""}
+EOF
+sleep 3
+# With invalid cc_rate, CC check should be disabled (fail open with error log), request should pass
+test_rule "cc_rate invalid -> CC disabled" 200 -H "User-Agent: Mozilla/5.0" "$TARGET/"
+# Send a few more requests to ensure cc_rate is parsed (parseCCRate only runs on cc_check call)
+curl -s -o /dev/null -H "User-Agent: Mozilla/5.0" "$TARGET/" 2>/dev/null
+curl -s -o /dev/null -H "User-Agent: Mozilla/5.0" "$TARGET/" 2>/dev/null
+sleep 2
+# Verify error log was written (caddy.Log().Error outputs to caddy stderr)
+if grep -q "invalid cc_rate" /tmp/caddy_waf.log 2>/dev/null; then
+    printf "  PASS  %-45s\n" "cc_rate error logged"; PASS=$((PASS+1))
+else
+    printf "  FAIL  %-45s\n" "cc_rate error logged"; FAIL=$((FAIL+1))
+    ERRORS="$ERRORS\n  cc_rate error not logged"
+fi
+
+echo ""
+echo "=== 25. CC attack detection ==="
+cat > $RULE_DIR/config.json << 'EOF'
+{"waf_enable":"on","trust_proxy_headers":"on","log_dir":"/tmp","white_url_check":"on","white_ip_check":"on","white_ua_check":"on","black_ip_check":"on","url_check":"on","url_args_check":"on","user_agent_check":"on","cookie_check":"on","cc_check":"on","cc_rate":"5/60","cc_block_ttl":300,"post_check":"on","referer_check":"off","file_upload_check":"on","bodyless":"on","multipart_streaming_check":"off","upload_filename_scan_limit":0,"post_body_scan_limit":2097152,"waf_output":"html","waf_redirect_url":""}
 EOF
 sleep 3
 echo "  Sending 10 fast requests (CC limit 5/60s)..."
@@ -358,7 +428,7 @@ cp /tmp/blackip.rule.bak $RULE_DIR/blackip.rule 2>/dev/null || true
 cp /tmp/whiteip.rule.bak $RULE_DIR/whiteip.rule 2>/dev/null || true
 cp /tmp/cdnip.rule.bak $RULE_DIR/cdnip.rule 2>/dev/null || true
 cat > $RULE_DIR/config.json << 'EOF'
-{"waf_enable":"on","trust_proxy_headers":"on","log_dir":"/var/log/caddyguard","url_check":"on","url_args_check":"on","post_check":"on","user_agent_check":"on","cookie_check":"on","cc_check":"on","cc_rate":"60/60","cc_block_ttl":600,"white_ip_check":"on","white_ua_check":"on","white_url_check":"on","black_ip_check":"on","referer_check":"off","file_upload_check":"on","waf_output":"html","waf_redirect_url":"https://www.waf.com"}
+{"waf_enable":"on","trust_proxy_headers":"on","log_dir":"/var/log/caddyguard","url_check":"on","url_args_check":"on","post_check":"on","user_agent_check":"on","cookie_check":"on","cc_check":"on","cc_rate":"60/60","cc_block_ttl":600,"white_ip_check":"on","white_ua_check":"on","white_url_check":"on","black_ip_check":"on","referer_check":"off","file_upload_check":"on","bodyless":"on","multipart_streaming_check":"off","upload_filename_scan_limit":0,"post_body_scan_limit":2097152,"waf_output":"html","waf_redirect_url":"https://www.waf.com"}
 EOF
 
 kill $(pgrep -x caddy) 2>/dev/null || true

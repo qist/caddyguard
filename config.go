@@ -23,6 +23,11 @@ type Config struct {
 	RefererCheck    string `json:"referer_check"`     // Referer 检测开关
 	FileUploadCheck string `json:"file_upload_check"` // 文件上传检测开关
 
+	// Bodyless 方法跳过开关（对应 Lua config_bodyless）
+	// "on" (默认) = GET/HEAD/OPTIONS 跳过 body/post/file_upload 检测
+	// "off"         = 所有方法都扫描 body（更严格，延迟更高）
+	Bodyless string `json:"bodyless"` // bodyless 方法跳过开关
+
 	WAFOutput      string `json:"waf_output"`       // 拦截输出 "html" / "redirect"
 	WAFRedirectURL string `json:"waf_redirect_url"` // 重定向 URL
 
@@ -54,6 +59,7 @@ func DefaultConfig() Config {
 		PostCheck:         "on",
 		RefererCheck:      "off",
 		FileUploadCheck:   "on",
+		Bodyless:          "on", // 默认开启：GET/HEAD/OPTIONS 跳过 body 检测
 		WAFOutput:         "html",
 		WAFRedirectURL:    "https://www.waf.com",
 

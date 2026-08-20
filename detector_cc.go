@@ -6,6 +6,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/caddyserver/caddy/v2"
+	"go.uber.org/zap"
 )
 
 // ccAttackCheck CC 攻击检测
@@ -48,12 +51,24 @@ func (g *Guard) ccAttackCheck(w http.ResponseWriter, r *http.Request, cfg Config
 
 // parseCCRate 解析 "60/60" → (60, 60)
 // 返回 (0, 0) 表示格式错误
+// 对应 Lua: 无效 cc_rate 时记录 ngx.ERR 日志，避免 CC 静默 fail-open
 func parseCCRate(rate string) (count, seconds int) {
 	parts := strings.Split(rate, "/")
 	if len(parts) != 2 {
+		caddy.Log().Error("[CaddyGuard] invalid cc_rate config",
+			zap.String("rate", rate),
+			zap.String("expected", "<count>/<seconds>"),
+			zap.String("action", "CC check disabled"))
 		return 0, 0
 	}
-	c, _ := strconv.Atoi(parts[0])
-	s, _ := strconv.Atoi(parts[1])
+	c, err1 := strconv.Atoi(parts[0])
+	s, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil || c <= 0 || s <= 0 {
+		caddy.Log().Error("[CaddyGuard] invalid cc_rate config",
+			zap.String("rate", rate),
+			zap.String("expected", "<count>/<seconds>"),
+			zap.String("action", "CC check disabled"))
+		return 0, 0
+	}
 	return c, s
 }

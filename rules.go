@@ -571,6 +571,9 @@ func mergeDomainConfig(base Config, domainCfg map[string]interface{}) Config {
 	if v, ok := domainCfg["file_upload_check"].(string); ok && v != "" {
 		cfg.FileUploadCheck = v
 	}
+	if v, ok := domainCfg["bodyless"].(string); ok && v != "" {
+		cfg.Bodyless = v
+	}
 	if v, ok := domainCfg["waf_output"].(string); ok && v != "" {
 		cfg.WAFOutput = v
 	}

@@ -12,7 +12,9 @@ Caddy v2 WAF (Web Application Firewall) 插件 — 用 Go 原生编写，为 Cad
 - **域名级配置**：支持全局配置 + 按域名覆盖（精确匹配 + 通配符）+ 域名级独立规则目录 + 域名级扫描阈值覆盖
 - **路径级配置**：支持基于 Caddy 原生 `path` matcher 的 WAF 开关，可对特定 URL 路径关闭 WAF（如 webhook、上传接口等）
 - **Body 扫描控制**：`post_body_scan_limit` 超限直接拦截防部分扫描误放行；`multipart_streaming_check` 开关控制 multipart body 是否走流式扫描；`upload_filename_scan_limit` 控制文件名扫描范围
-- **同步日志**：与 Lua 版一致，攻击日志同步落盘，不丢失。`sync.Mutex` 保护并发写入
+- **bodyless 方法控制**：`bodyless` 配置项控制 GET/HEAD/OPTIONS 是否跳过 body 检测，支持域名级覆盖（如对特定域名强制全方法扫描）
+- **同步日志**：与 Lua 版一致，攻击日志同步落盘，不丢失。`sync.Mutex` 保护并发写入。日志字段自动截断到 4096 字节，防止单条日志过大
+- **cc_rate 配置校验**：无效的 `cc_rate` 配置自动记录错误日志，避免 CC 防护静默失效
 - **零 reflect/unsafe**：使用 Caddy 标准中间件链，不依赖私有字段反射
 - **ReDoS 安全**：基于 Go RE2 正则引擎，无回溯爆炸风险
 
@@ -223,6 +225,7 @@ caddy run --config /etc/caddy/caddy.json
 | `black_ip_check` | string | `"on"` | IP 黑名单检测开关 |
 | `referer_check` | string | `"off"` | Referer 检测开关 |
 | `file_upload_check` | string | `"on"` | 文件上传扩展名检测开关 |
+| `bodyless` | string | `"on"` | bodyless 方法跳过开关。`"on"`（默认）= GET/HEAD/OPTIONS 跳过 body/post/file_upload 检测（更低延迟）；`"off"` = 所有方法都扫描 body（更严格，延迟更高） |
 | `multipart_streaming_check` | string | `"off"` | multipart body 流式内容扫描开关（`post.rule`）。默认 `off`，关闭时仍保留文件名扩展名检查 |
 | `upload_filename_scan_limit` | int | `0` | multipart 文件名扫描上限（字节）。`0`=扫描整个文件；正整数=只扫描前 N 字节 |
 | `post_body_scan_limit` | int | `2097152` | 非 multipart body 扫描上限（字节）。超过此值直接拦截，避免部分扫描后误放行 |
@@ -246,6 +249,10 @@ caddy run --config /etc/caddy/caddy.json
         "multipart_streaming_check": "on",
         "post_body_scan_limit": 1048576,
         "upload_filename_scan_limit": 1024
+    },
+    "strict.example.com": {
+        "_comment": "示例：对该域名强制扫描所有方法的 body（包括 GET/HEAD/OPTIONS）",
+        "bodyless": "off"
     },
     "*.test.com": {
         "post_check": "off",
@@ -547,7 +554,7 @@ CaddyGuard 支持规则和配置的热加载：
 | URL 参数短路 | 无查询参数时直接返回，跳过 pairs 循环和正则匹配 |
 | 最小输入长度检查 | 输入 < 2 字符直接跳过规则匹配 |
 | 白名单 URL 路径优先 | 先匹配 URI path（常见场景），再匹配完整 request_uri（兼容含 query 的白名单） |
-| 请求类型短路 | GET/HEAD/OPTIONS 跳过 POST 和文件上传检测；DELETE 走 body 检测 |
+| 请求类型短路 | `bodyless="on"`（默认）时 GET/HEAD/OPTIONS 跳过 POST 和文件上传检测；`bodyless="off"` 时所有方法都扫描 body；POST/PUT/PATCH/DELETE 始终走 body 检测 |
 | Cookie 检测后移 | Cookie 检测移到 URL/Args 之后，攻击请求在 URL 阶段即短路返回 |
 | IP 预编译缓存 | CIDR 排序 + 二分搜索 + 精确 IP hash 查找 |
 | 配置预合并 | 域名级配置在加载阶段预合并，请求阶段 O(1) 查找 |
@@ -597,6 +604,11 @@ CaddyGuard 支持规则和配置的热加载：
 | IPv6 黑名单 CIDR 拦截 | ✅ | 2001:db8::/32 正确拦截 (403) |
 | IPv4 白名单放行 | ✅ | 8.8.8.8 跳过所有检测 (200) |
 | IPv6 白名单放行 | ✅ | ::1 / 2001:db8::5 跳过所有检测 (200) |
+| bodyless=on/off 切换 | ✅ | on: GET/HEAD/OPTIONS 跳过 body 检测；off: 全方法扫描 |
+| bodyless 域名级覆盖 | ✅ | strict.example.com 覆盖为 off，强制扫描所有方法 |
+| 日志字段截断保护 | ✅ | 10000 字节攻击 URL 截断到 4110 字节 (4096+...[truncated]) |
+| cc_rate 无效配置 | ✅ | CC 检测自动禁用 + 错误日志记录，避免静默 fail-open |
+| 回归测试 156 项 | ✅ | 156/156 全部通过，0 失败 |
 
 ### 攻击拦截测试详情
 
@@ -627,6 +639,10 @@ CaddyGuard 支持规则和配置的热加载：
 | .txt 文件上传 | 非403 | ✅ 200 | 正常文件放行 |
 | .sql 文件上传 | 403 | ✅ 403 | 文件扩展名检测 |
 | .htaccess 文件上传 | 403 | ✅ 403 | 文件扩展名检测 |
+| bodyless=on GET 跳过 body | 200 | ✅ 200 | GET 无 body 检测开销 |
+| bodyless=off 全方法扫描 | 403 | ✅ 403 | POST 攻击仍被拦截 |
+| 日志截断 10KB URL | 403 | ✅ 403 | req_url 截断到 4110 字节 |
+| cc_rate 无效配置 | 200 | ✅ 200 | CC 禁用 + 错误日志记录 |
 
 ## 部署
 

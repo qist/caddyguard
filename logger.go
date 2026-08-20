@@ -13,6 +13,7 @@ import (
 //
 // 对应 Lua lib.lua 的 log_record：
 //   - 同步写入：io.open → write → flush → close，确保日志落盘后再返回 403
+//   - 字段截断：超长字段截断到 4096 字节，防止单条日志过大导致写入丢失
 //   - 轮转：文件超过 100MB 时重命名为 .old
 //   - 文件路径：{log_dir}/{YYYY-MM-DD}_waf.log
 //   - JSON 格式：每行一条 JSON
@@ -52,6 +53,18 @@ func NewWAFLogger(logDir string) *WAFLogger {
 	}
 }
 
+// logFieldMax 日志字段截断上限（对应 Lua 的 LOG_FIELD_MAX = 4096）
+// 防止超长 request_uri / payload 把日志行撑爆或导致写入丢失
+const logFieldMax = 4096
+
+// truncateField 截断超长字段，对应 Lua 的 truncate_field()
+func truncateField(s string) string {
+	if len(s) > logFieldMax {
+		return s[:logFieldMax] + "...[truncated]"
+	}
+	return s
+}
+
 // Record 同步写入日志（不丢失）
 // 对应 Lua 的 log_record：同步 open → write → flush → close
 // 仅在攻击检测命中时调用，正常流量零开销
@@ -62,10 +75,10 @@ func (l *WAFLogger) Record(method, reqURL, reqData, ruleTag, clientIP string, r 
 		ClientIP:     clientIP,
 		LocalTime:    now.Format("2006-01-02 15:04:05"),
 		ServerName:   getDomain(r),
-		UserAgent:    r.UserAgent(),
+		UserAgent:    truncateField(r.UserAgent()),
 		AttackMethod: method,
-		ReqURL:       reqURL,
-		ReqData:      reqData,
+		ReqURL:       truncateField(reqURL),
+		ReqData:      truncateField(reqData),
 		RuleTag:      ruleTag,
 	}
 
@@ -111,7 +124,18 @@ func (l *WAFLogger) write(entry LogEntry) {
 	} else if nowUnix-l.lastRotationCheck > 60 {
 		// 每 60s 检查一次文件大小是否超过 100MB
 		l.lastRotationCheck = nowUnix
-		if l.fileSize > 100*1024*1024 {
+		// 同时检查文件是否被外部删除/轮转（如 logrotate）
+		// l.file.Stat() 在 Linux 下文件被删除后不会报错（inode 仍在），
+		// 所以用 os.Stat(logPath) 检查路径是否存在
+		if _, err := os.Stat(logPath); err != nil {
+			// 文件句柄失效（被删除/轮转），重新打开
+			l.closeFile()
+			f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+			if err != nil {
+				return
+			}
+			l.file = f
+		} else if l.fileSize > 100*1024*1024 {
 			l.closeFile()
 			os.Rename(logPath, logPath+".old")
 			l.fileSize = 0

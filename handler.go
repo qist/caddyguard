@@ -21,9 +21,10 @@ import (
 // 11. Cookie 检测
 // 12. [非 bodyless] POST 检测
 //
-// 请求类型分叉（对应 Lua 的 is_bodyless 优化）：
-//   - GET/HEAD/OPTIONS/DELETE → 跳过文件上传和 POST 检测
-//   - POST/PUT/PATCH → 执行全部检测
+// 请求类型分叉（对应 Lua 的 is_bodyless_method 优化）：
+//   - bodyless="on" (默认): GET/HEAD/OPTIONS 跳过文件上传和 POST 检测
+//   - bodyless="off":        所有方法都执行全部检测
+//   - POST/PUT/PATCH/DELETE: 始终执行 body 检测（不受 bodyless 开关影响）
 func (g *Guard) runChecks(w http.ResponseWriter, r *http.Request, cfg Config) bool {
 	// 1. 白名单 IP → 放行
 	if g.whiteIPCheck(r, cfg) {
@@ -47,9 +48,10 @@ func (g *Guard) runChecks(w http.ResponseWriter, r *http.Request, cfg Config) bo
 	}
 
 	// 请求类型分叉：GET/HEAD/OPTIONS 跳过 body 相关检测
-	// 对应 Lua 的 is_bodyless_method: GET/HEAD/OPTIONS（DELETE 需走 body 检测）
+	// 对应 Lua 的 is_bodyless_method: bodyless="on" 时 GET/HEAD/OPTIONS 跳过
+	// bodyless="off" 时所有方法都扫描 body（更严格）
 	method := r.Method
-	isBodyless := method == "GET" || method == "HEAD" || method == "OPTIONS"
+	isBodyless := cfg.Bodyless != "off" && (method == "GET" || method == "HEAD" || method == "OPTIONS")
 
 	// 5. User-Agent 检测（白名单 UA 仅跳过此项）
 	if g.userAgentAttackCheck(w, r, cfg) {

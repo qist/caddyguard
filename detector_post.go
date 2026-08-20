@@ -21,10 +21,15 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 	}
 
 	// 仅检查带 body 的方法（POST/PUT/PATCH/DELETE）
-	// 对应 Lua: is_bodyless_method 排除 GET/HEAD/OPTIONS，DELETE 需走 body 检测
+	// 对应 Lua: is_bodyless_method 排除 GET/HEAD/OPTIONS
+	// bodyless="off" 时所有方法都扫描 body（handler.go 层已控制是否进入此函数，
+	// 这里做二次防御确保非 bodyless 方法不被跳过）
 	method := r.Method
-	if method != "POST" && method != "PUT" && method != "PATCH" && method != "DELETE" {
-		return false
+	if cfg.Bodyless != "off" {
+		// bodyless="on" (默认): GET/HEAD/OPTIONS 不走 body 检测
+		if method == "GET" || method == "HEAD" || method == "OPTIONS" {
+			return false
+		}
 	}
 
 	if r.Body == nil {
