@@ -64,7 +64,7 @@ start_test() {
 
 deploy_config() {
     cp "$1" $RULE_DIR/config.json
-    sleep 3
+    sleep 5
 }
 
 # 运行 ab 压测并输出结果
@@ -136,13 +136,14 @@ echo "--- E: WAF 攻击请求触发拦截 + 日志写入 ---"
 cat > /tmp/config_E.json << 'EOF'
 {"waf_enable":"on","trust_proxy_headers":"on","log_dir":"/var/log/caddyguard","white_url_check":"on","white_ip_check":"on","white_ua_check":"on","black_ip_check":"on","url_check":"on","url_args_check":"on","user_agent_check":"on","cookie_check":"on","cc_check":"off","cc_rate":"999999/60","cc_block_ttl":0,"post_check":"on","referer_check":"off","file_upload_check":"on","waf_output":"html","waf_redirect_url":""}
 EOF
+mkdir -p /var/log/caddyguard
 rm -f /var/log/caddyguard/*_waf.log 2>/dev/null || true
 deploy_config "/tmp/config_E.json"
 start_test "$CONF_DIR/Caddyfile.WAF"
 # 攻击 UA（sqlmap）被 WAF 直接拦截，不经过后端
-bench "E1-WAF-attack-UA" 50000 200 "" "" "sqlmap/1.0"
-# 等待异步日志 worker flush
-sleep 3
+bench "E1-WAF-attack-UA" 50000 200 "" "" "User-Agent: sqlmap/1.0"
+# 等待同步日志写入完成
+sleep 2
 LOG_COUNT=$(cat /var/log/caddyguard/*_waf.log 2>/dev/null | wc -l)
 echo "  WAF log entries: $LOG_COUNT" >> $RESULT_FILE
 echo "  WAF log entries: $LOG_COUNT"

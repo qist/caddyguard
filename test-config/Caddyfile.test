@@ -19,5 +19,5 @@
 	}
 
 	# 默认路由（走 WAF）
-	reverse_proxy 127.0.0.1:8889
+	reverse_proxy 127.0.0.1:8080
 }
