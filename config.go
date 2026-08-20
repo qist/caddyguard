@@ -25,6 +25,11 @@ type Config struct {
 
 	WAFOutput      string `json:"waf_output"`       // 拦截输出 "html" / "redirect"
 	WAFRedirectURL string `json:"waf_redirect_url"` // 重定向 URL
+
+	// Body 扫描控制（对应 Lua config_upload_filename_scan_limit / config_post_body_scan_limit）
+	MultipartStreamingCheck string `json:"multipart_streaming_check"` // multipart body 流式扫描开关 "on"/"off"
+	UploadFilenameScanLimit int64 `json:"upload_filename_scan_limit"` // multipart 文件名扫描上限（字节），0=全扫
+	PostBodyScanLimit       int64 `json:"post_body_scan_limit"`        // 非 multipart body 扫描上限（字节），超过直接拦截
 }
 
 // DefaultConfig 返回默认配置
@@ -51,5 +56,10 @@ func DefaultConfig() Config {
 		FileUploadCheck:   "on",
 		WAFOutput:         "html",
 		WAFRedirectURL:    "https://www.waf.com",
+
+		// Body 扫描控制默认值（对应 Lua config.lua 默认值）
+		MultipartStreamingCheck: "off",    // 默认关闭：multipart 只做 filename 检查，跳过 raw body 流式扫描
+		UploadFilenameScanLimit: 0,        // 0 = 扫描整个上传临时文件
+		PostBodyScanLimit:       2097152, // 2MB：超过此值直接拦截
 	}
 }

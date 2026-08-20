@@ -16,6 +16,9 @@
     "post_check": "on",
     "referer_check": "off",
     "file_upload_check": "on",
+    "multipart_streaming_check": "off",
+    "upload_filename_scan_limit": 0,
+    "post_body_scan_limit": 2097152,
     "waf_output": "html",
     "waf_redirect_url": "https://www.caddyguard.com"
 }

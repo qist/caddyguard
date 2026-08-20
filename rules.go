@@ -577,5 +577,15 @@ func mergeDomainConfig(base Config, domainCfg map[string]interface{}) Config {
 	if v, ok := domainCfg["waf_redirect_url"].(string); ok && v != "" {
 		cfg.WAFRedirectURL = v
 	}
+	// Body 扫描阈值（域名级覆盖）
+	if v, ok := domainCfg["multipart_streaming_check"].(string); ok && v != "" {
+		cfg.MultipartStreamingCheck = v
+	}
+	if v, ok := domainCfg["upload_filename_scan_limit"].(float64); ok {
+		cfg.UploadFilenameScanLimit = int64(v)
+	}
+	if v, ok := domainCfg["post_body_scan_limit"].(float64); ok {
+		cfg.PostBodyScanLimit = int64(v)
+	}
 	return cfg
 }

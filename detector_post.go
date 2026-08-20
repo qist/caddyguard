@@ -6,6 +6,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -19,9 +20,10 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 		return false
 	}
 
-	// 仅检查 POST/PUT/PATCH
+	// 仅检查带 body 的方法（POST/PUT/PATCH/DELETE）
+	// 对应 Lua: is_bodyless_method 排除 GET/HEAD/OPTIONS，DELETE 需走 body 检测
 	method := r.Method
-	if method != "POST" && method != "PUT" && method != "PATCH" {
+	if method != "POST" && method != "PUT" && method != "PATCH" && method != "DELETE" {
 		return false
 	}
 
@@ -39,11 +41,17 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 	// the regex work before the upload detector reads it again.
 	contentType := r.Header.Get("Content-Type")
 	isFormURLEncoded := false
+	isMultipartForm := false
 	if contentType != "" {
 		mediaType, _, err := mime.ParseMediaType(contentType)
 		if err == nil {
 			if strings.EqualFold(mediaType, "multipart/form-data") {
-				return false
+				isMultipartForm = true
+				// multipart_streaming_check == "off" 时跳过 raw body 扫描（默认）
+				// 对应 Lua: if is_multipart_form and not is_multipart_streaming_enabled() then return false end
+				if cfg.MultipartStreamingCheck != "on" {
+					return false
+				}
 			}
 			if strings.EqualFold(mediaType, "application/x-www-form-urlencoded") {
 				isFormURLEncoded = true
@@ -58,12 +66,38 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 		return false
 	}
 
-	// 限制读取大小（防止超大 body 消耗内存）
-	maxSize := int64(10 * 1024 * 1024) // 10MB
-	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxSize))
+	// 限制读取大小（对应 Lua 的 post_body_scan_limit）
+	// 超过此值的非 multipart body 直接拦截，避免只扫前半段后误放行
+	postBodyScanLimit := cfg.PostBodyScanLimit
+	if postBodyScanLimit <= 0 {
+		postBodyScanLimit = 2097152 // 2MB 默认
+	}
+
+	// 非 multipart 的 body：如果 ContentLength 已知且超过限制，直接拦截
+	// multipart body 不受此限制（由 fileUploadCheck 的 upload_filename_scan_limit 控制）
+	if !isMultipartForm && r.ContentLength > postBodyScanLimit {
+		g.logger.Record("POSTOversize", reqURICached(r), "size:"+strconv.FormatInt(r.ContentLength, 10), "max:"+strconv.FormatInt(postBodyScanLimit, 10), g.getClientIPCached(r, cfg), r, cfg)
+		if cfg.WAFEnable == "on" {
+			g.wafOutput(w, cfg)
+		}
+		return true
+	}
+
+	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, postBodyScanLimit+1)) // +1 to detect truncation
 	r.Body.Close()
 	if err != nil || len(bodyBytes) == 0 {
 		return false
+	}
+
+	// 截断检测：如果读取到的字节数超过限制，说明 body 大于阈值
+	// 对应 Lua: file_size > post_body_scan_limit → 拦截
+	// multipart body 不受此限制（由 fileUploadCheck 处理）
+	if !isMultipartForm && int64(len(bodyBytes)) > postBodyScanLimit {
+		g.logger.Record("POSTOversize", reqURICached(r), "size:>"+strconv.FormatInt(postBodyScanLimit, 10), "max:"+strconv.FormatInt(postBodyScanLimit, 10), g.getClientIPCached(r, cfg), r, cfg)
+		if cfg.WAFEnable == "on" {
+			g.wafOutput(w, cfg)
+		}
+		return true
 	}
 
 	// 恢复 body 供后续 handler 使用（用 bytes.NewReader 避免额外的 string 拷贝）

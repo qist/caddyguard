@@ -1,7 +1,7 @@
 #!/bin/bash
 # CaddyGuard 全检测点完整测试
-# 覆盖：白名单IP/URL/UA、黑名单IP、动态黑名单、CC、UA、URL路径、URL参数、
-#       Cookie、Referer、POST、文件上传、请求类型分叉、编码绕过、CDN IP验证、IP缓存
+# 覆盖：白名单IP/URL/UA、黑名单IP、动态黑名单、CC、UA、URL路径、URL参数(含截断兜底)、
+#       Cookie、Referer、POST(含大body拦截)、文件上传(含大小写变体)、请求类型分叉、编码绕过、CDN IP验证、IP缓存
 # 测试服务器：192.168.2.180
 
 set +e  # Don't exit on error - we handle errors ourselves
@@ -161,6 +161,10 @@ entity_code=$(curl -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozill
 if [ "$entity_code" = "403" ]; then printf "  PASS  %-45s (HTTP %s)\n" "Args HTML entity XSS" "$entity_code"; PASS=$((PASS+1)); else printf "  FAIL  %-45s (got %s, want 403)\n" "Args HTML entity XSS" "$entity_code"; FAIL=$((FAIL+1)); ERRORS="$ERRORS\n  Args HTML entity XSS: got $entity_code"; fi
 test_rule "Args JS hex XSS"          403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=\\x3Cscript\\x3E"
 
+# URL args truncation: 256+ params with attack payload at the tail
+LONG_ARGS=$(python3 -c "print('&'.join('a%d=1'%i for i in range(260)) + '&tail=1+union+select+1')")
+test_rule "URL args truncated tail attack" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?${LONG_ARGS}"
+
 echo ""
 echo "=== 11. Cookie detection ==="
 test_rule "Cookie SQL union"       403 -H "User-Agent: Mozilla/5.0" -b "id=1 union select 1" "$TARGET/"
@@ -202,6 +206,12 @@ test_rule "POST JS Unicode XSS"    403 -H "User-Agent: Mozilla/5.0" -d 'q=\u003C
 test_rule "POST HTML entity XSS"   403 -H "User-Agent: Mozilla/5.0" -d 'q=&#60;script&#62;' "$TARGET/"
 test_rule "POST JSON SQL injection" 403 -H "User-Agent: Mozilla/5.0" -H "Content-Type: application/json" -d '{"id":"1 union select 1"}' "$TARGET/"
 test_rule "POST JSON XSS"          403 -H "User-Agent: Mozilla/5.0" -H "Content-Type: application/json" -d '{"q":"<script>alert(1)</script>"}' "$TARGET/"
+test_rule "DELETE body SQL union"  403 -X DELETE -H "User-Agent: Mozilla/5.0" -d "id=1+union+select+1" "$TARGET/"
+
+# Large JSON body exceeding scan limit (2MB+1KB) → should be blocked
+python3 -c "print('{\"q\":\"' + 'a'*2097152 + ' union select 1' + '\"}')" > /tmp/caddyguard_large_attack.json
+code=$(curl -s -m 15 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" -H "Content-Type: application/json" --data-binary @/tmp/caddyguard_large_attack.json "$TARGET/")
+if [ "$code" = "403" ]; then printf "  PASS  %-45s (HTTP %s)\n" "Large JSON over scan limit" "$code"; PASS=$((PASS+1)); else printf "  FAIL  %-45s (got %s, want 403)\n" "Large JSON over scan limit" "$code"; FAIL=$((FAIL+1)); ERRORS="$ERRORS\n  Large JSON over scan limit: got $code"; fi
 
 echo ""
 echo "=== 14. POST encoding bypass (fullDecode) ==="
@@ -227,6 +237,19 @@ test_rule "Upload .phtml"          403 -H "User-Agent: Mozilla/5.0" -F "file=@/d
 test_rule "Upload .txt normal"     200 -H "User-Agent: Mozilla/5.0" -F "file=@/dev/null;filename=readme.txt" "$TARGET/"
 test_rule "Upload .png normal"     200 -H "User-Agent: Mozilla/5.0" -F "file=@/dev/null;filename=image.png" "$TARGET/"
 test_rule "Upload .pdf normal"     200 -H "User-Agent: Mozilla/5.0" -F "file=@/dev/null;filename=document.pdf" "$TARGET/"
+
+# Multipart Content-Type case-insensitive variant
+MULTIPART_BODY=/tmp/caddyguard_multipart_case.txt
+cat > "$MULTIPART_BODY" <<'MPEOF'
+--AaB03x
+Content-Disposition: form-data; name="file"; filename="case-test.php"
+Content-Type: application/octet-stream
+
+hello
+--AaB03x--
+MPEOF
+code=$(curl -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" -H "Content-Type: Multipart/Form-Data; boundary=AaB03x" --data-binary @"$MULTIPART_BODY" "$TARGET/" 2>/dev/null || true)
+if [ "$code" = "403" ]; then printf "  PASS  %-45s (HTTP %s)\n" "Upload Multipart/Form-Data case variant" "$code"; PASS=$((PASS+1)); else printf "  FAIL  %-45s (got %s, want 403)\n" "Upload Multipart/Form-Data case variant" "$code"; FAIL=$((FAIL+1)); ERRORS="$ERRORS\n  Multipart case variant: got $code"; fi
 
 echo ""
 echo "=== 16. Multipart form field POST scan ==="

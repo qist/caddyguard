@@ -46,10 +46,10 @@ func (g *Guard) runChecks(w http.ResponseWriter, r *http.Request, cfg Config) bo
 		return false
 	}
 
-	// 请求类型分叉：GET/HEAD/OPTIONS/DELETE 跳过 body 相关检测
-	// 对应 Lua 的 is_bodyless = (METHOD == "GET" or METHOD == "HEAD" or METHOD == "OPTIONS" or METHOD == "DELETE")
+	// 请求类型分叉：GET/HEAD/OPTIONS 跳过 body 相关检测
+	// 对应 Lua 的 is_bodyless_method: GET/HEAD/OPTIONS（DELETE 需走 body 检测）
 	method := r.Method
-	isBodyless := method == "GET" || method == "HEAD" || method == "OPTIONS" || method == "DELETE"
+	isBodyless := method == "GET" || method == "HEAD" || method == "OPTIONS"
 
 	// 5. User-Agent 检测（白名单 UA 仅跳过此项）
 	if g.userAgentAttackCheck(w, r, cfg) {

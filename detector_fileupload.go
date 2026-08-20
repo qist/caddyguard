@@ -3,6 +3,7 @@ package caddyguard
 import (
 	"bytes"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"strings"
@@ -18,7 +19,8 @@ func (g *Guard) fileUploadCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 	}
 
 	contentType := r.Header.Get("Content-Type")
-	if !strings.Contains(contentType, "multipart/form-data") {
+	// 大小写不敏感匹配 multipart/form-data（对应 Lua 的 string_lower + string_find）
+	if !strings.Contains(strings.ToLower(contentType), "multipart/form-data") {
 		return false
 	}
 
@@ -35,8 +37,9 @@ func (g *Guard) fileUploadCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 		return false
 	}
 	// 读取完整 body 以便后续恢复（multipart 解析会消费 reader）
-	// 限制读取大小 32MB
-	maxSize := int64(32 * 1024 * 1024)
+	// 对应 Lua: upload_filename_scan_limit 控制扫描上限
+	maxSize := int64(32 * 1024 * 1024) // 32MB 硬上限防止 OOM
+	// cfg.UploadFilenameScanLimit 控制扫描范围，但不影响 body 读取（multipart 需完整读取才能恢复）
 	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxSize))
 	r.Body.Close()
 	if err != nil || len(bodyBytes) == 0 {
@@ -47,7 +50,17 @@ func (g *Guard) fileUploadCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 	// 使用 multipart.Reader 流式解析，只读 header 不读文件内容
-	reader := multipart.NewReader(bytes.NewReader(bodyBytes), strings.TrimPrefix(contentType, "multipart/form-data; boundary="))
+	// 用 mime.ParseMediaType 正确提取 boundary（兼容大小写变体如 Multipart/Form-Data）
+	var boundary string
+	_, params, parseErr := mime.ParseMediaType(contentType)
+	if parseErr == nil {
+		boundary = params["boundary"]
+	}
+	if boundary == "" {
+		// 回退：直接截取 boundary=
+		boundary = strings.TrimPrefix(strings.ToLower(contentType), "multipart/form-data; boundary=")
+	}
+	reader := multipart.NewReader(bytes.NewReader(bodyBytes), boundary)
 
 	for {
 		part, err := reader.NextPart()

@@ -62,8 +62,18 @@ func (g *Guard) urlArgsAttackCheck(w http.ResponseWriter, r *http.Request, cfg C
 		return false
 	}
 
-	// 遍历所有参数（key + value）
+	// 参数截断保护（对应 Lua req_get_uri_args(256) 限制）
+	// 当参数数量超过 256 时，只遍历前 256 个，然后回退到原始 RawQuery 扫描
+	const maxArgsParse = 256
+	argsTruncated := len(query) > maxArgsParse
+
+	// 遍历参数（key + value），截断时只扫前 256 个
+	count := 0
 	for key, vals := range query {
+		if argsTruncated && count >= maxArgsParse {
+			break
+		}
+		count++
 		// 检查参数名（key）
 		if key != "" {
 			if matched := matchRules(key, rules, true); matched != nil {
@@ -102,6 +112,50 @@ func (g *Guard) urlArgsAttackCheck(w http.ResponseWriter, r *http.Request, cfg C
 					g.logger.Record("URLArgs", reqURICached(r), val, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 					g.wafOutput(w, cfg)
 					return true
+				}
+			}
+		}
+	}
+
+	// 参数截断回退：扫描原始 RawQuery 字符串（对应 Lua 的 var.args 回退）
+	// 防止攻击者用 256+ 参数把攻击 payload 藏在截断后的参数中
+	if argsTruncated {
+		rawArgs := r.URL.RawQuery
+		if rawArgs != "" {
+			// 1. 匹配原始 RawQuery
+			if matched := matchRules(rawArgs, rules, true); matched != nil {
+				g.logger.Record("URLArgs", reqURICached(r), "truncated_query", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+				g.wafOutput(w, cfg)
+				return true
+			}
+			// 2. + 号替换为空格后匹配（对应 Lua 的 normalized_args）
+			var normalizedArgs string
+			if strings.Contains(rawArgs, "+") {
+				normalizedArgs = strings.ReplaceAll(rawArgs, "+", " ")
+				if matched := matchRules(normalizedArgs, rules, true); matched != nil {
+					g.logger.Record("URLArgs", reqURICached(r), "truncated_query", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+					g.wafOutput(w, cfg)
+					return true
+				}
+			}
+			// 3. URL 解码后匹配
+			if hasEncodeMarkers(rawArgs) {
+				if decoded, changed := fullDecode(rawArgs); changed {
+					if matched := matchRules(decoded, rules, true); matched != nil {
+						g.logger.Record("URLArgs", reqURICached(r), "truncated_query", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+						g.wafOutput(w, cfg)
+						return true
+					}
+				}
+			}
+			// 4. normalized + 解码后匹配
+			if normalizedArgs != "" && hasEncodeMarkers(normalizedArgs) {
+				if decoded, changed := fullDecode(normalizedArgs); changed {
+					if matched := matchRules(decoded, rules, true); matched != nil {
+						g.logger.Record("URLArgs", reqURICached(r), "truncated_query", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+						g.wafOutput(w, cfg)
+						return true
+					}
 				}
 			}
 		}
