@@ -5,12 +5,14 @@ Caddy v2 WAF (Web Application Firewall) 插件 — 用 Go 原生编写，为 Cad
 ## 特性
 
 - **全局自动生效**：全局配置一次 `rule_dir`，所有站点自动启用 WAF，无需每个站点单独写 `caddyguard` 指令（通过 `caddyguardfile` 适配器实现）
-- **12 项检测链**：白名单 IP/URL/UA、黑名单 IP、CC 攻击防护、URL 路径/参数检测、User-Agent/Cookie/Referer 检测、POST body 检测、文件上传扩展名检测
+- **12 项检测链**：白名单 IP/URL/UA、黑名单 IP、CC 攻击防护、URL 路径/参数检测（含 256+ 参数截断兜底）、User-Agent/Cookie/Referer 检测、POST body 检测（含大 body 超限拦截）、文件上传扩展名检测
 - **IPv4/IPv6 双栈**：IP 黑白名单同时支持 IPv4 和 IPv6，支持 CIDR 表示法（`192.168.1.0/24`、`2001:db8::/32`）、glob 通配符（`192.168.*.*`、`2001:db8::*`）和精确匹配
-- **高性能**：正则预编译（含 `(?i)` 大小写不敏感版本）+ POST body 关键词自动提取预过滤 + 64 分片 CC 存储 + Config 预合并缓存，WAF 全规则开启仅 ~11% 性能开销
+- **高性能**：正则预编译（含 `(?i)` 大小写不敏感版本）+ POST body 关键词自动提取预过滤 + 64 分片 CC 存储 + Config 预合并缓存，WAF 全规则开启仅 ~1.7% 性能开销
 - **热加载**：规则和配置文件修改后 2 秒内自动生效，无需重启 Caddy
-- **域名级配置**：支持全局配置 + 按域名覆盖（精确匹配 + 通配符）+ 域名级独立规则目录
+- **域名级配置**：支持全局配置 + 按域名覆盖（精确匹配 + 通配符）+ 域名级独立规则目录 + 域名级扫描阈值覆盖
 - **路径级配置**：支持基于 Caddy 原生 `path` matcher 的 WAF 开关，可对特定 URL 路径关闭 WAF（如 webhook、上传接口等）
+- **Body 扫描控制**：`post_body_scan_limit` 超限直接拦截防部分扫描误放行；`multipart_streaming_check` 开关控制 multipart body 是否走流式扫描；`upload_filename_scan_limit` 控制文件名扫描范围
+- **同步日志**：与 Lua 版一致，攻击日志同步落盘，不丢失。`sync.Mutex` 保护并发写入
 - **零 reflect/unsafe**：使用 Caddy 标准中间件链，不依赖私有字段反射
 - **ReDoS 安全**：基于 Go RE2 正则引擎，无回溯爆炸风险
 
@@ -219,6 +221,9 @@ caddy run --config /etc/caddy/caddy.json
 | `black_ip_check` | string | `"on"` | IP 黑名单检测开关 |
 | `referer_check` | string | `"off"` | Referer 检测开关 |
 | `file_upload_check` | string | `"on"` | 文件上传扩展名检测开关 |
+| `multipart_streaming_check` | string | `"off"` | multipart body 流式内容扫描开关（`post.rule`）。默认 `off`，关闭时仍保留文件名扩展名检查 |
+| `upload_filename_scan_limit` | int | `0` | multipart 文件名扫描上限（字节）。`0`=扫描整个文件；正整数=只扫描前 N 字节 |
+| `post_body_scan_limit` | int | `2097152` | 非 multipart body 扫描上限（字节）。超过此值直接拦截，避免部分扫描后误放行 |
 | `waf_output` | string | `"html"` | 拦截响应模式：`"html"` 返回拦截页面，`"redirect"` 302 跳转 |
 | `waf_redirect_url` | string | - | `waf_output` 为 redirect 时的跳转 URL |
 
@@ -233,6 +238,12 @@ caddy run --config /etc/caddy/caddy.json
     },
     "api.example.com": {
         "waf_enable": "off"
+    },
+    "limit.example.com": {
+        "_comment": "示例：域名级 body/file 扫描阈值覆盖",
+        "multipart_streaming_check": "on",
+        "post_body_scan_limit": 1048576,
+        "upload_filename_scan_limit": 1024
     },
     "*.test.com": {
         "post_check": "off",
@@ -354,8 +365,8 @@ YandexBot
 | 8 | URL 参数 | `args.rule` | SQL 注入、XSS、SSTI、RCE 等 |
 | 9 | Cookie | `cookie.rule` | Cookie 注入 |
 | 10 | Referer | `referer.rule` | 恶意来源、支付接口保护 |
-| 11 | POST body | `post.rule` | 需读取 body；关键词自动提取预过滤跳过正常请求；multipart 交由文件上传检测；空规则不读取 body |
-| 12 | 文件上传 | `fileext.rule` | 需解析 multipart，最昂贵 |
+| 11 | POST body | `post.rule` | 需读取 body；关键词自动提取预过滤跳过正常请求；multipart 默认跳过（由 `multipart_streaming_check` 控制）；空规则不读取 body |
+| 12 | 文件上传 | `fileext.rule` | 需解析 multipart，最昂贵；Content-Type 大小写不敏感匹配 |
 
 ## 热加载
 
@@ -376,11 +387,11 @@ CaddyGuard 支持规则和配置的热加载：
 
 ## 日志
 
-- **异步写入**：buffered channel (4096) + worker goroutine
-- **队列满时丢弃**：日志队列满时直接丢弃新日志，不阻塞请求
+- **同步写入**：与 Lua 版一致，攻击日志在返回 403 前已落盘，不丢失
+- **并发安全**：`sync.Mutex` 保护多 goroutine 并发写入（Go 与 Lua 的唯一差异：Lua 靠 OpenResty 单 worker 天然串行）
 - **JSON 格式**：每行一条 JSON，包含时间戳、客户端 IP、攻击类型、命中规则、请求 URL 等
 - **日志文件**：`{log_dir}/{YYYY-MM-DD}_waf.log`
-- **自动轮转**：单文件超过 100MB 时重命名为 `.old`，按天分文件
+- **自动轮转**：单文件超过 100MB 时重命名为 `.old`，按天分文件，轮转检查每 60 秒一次
 
 ### 日志字段
 
@@ -478,7 +489,7 @@ CaddyGuard 支持规则和配置的热加载：
 | URL 参数短路 | 无查询参数时直接返回，跳过 pairs 循环和正则匹配 |
 | 最小输入长度检查 | 输入 < 2 字符直接跳过规则匹配 |
 | 白名单 URL 路径优先 | 先匹配 URI path（常见场景），再匹配完整 request_uri（兼容含 query 的白名单） |
-| 请求类型短路 | GET/HEAD/OPTIONS/DELETE 跳过 POST 和文件上传检测 |
+| 请求类型短路 | GET/HEAD/OPTIONS 跳过 POST 和文件上传检测；DELETE 走 body 检测 |
 | Cookie 检测后移 | Cookie 检测移到 URL/Args 之后，攻击请求在 URL 阶段即短路返回 |
 | IP 预编译缓存 | CIDR 排序 + 二分搜索 + 精确 IP hash 查找 |
 | 配置预合并 | 域名级配置在加载阶段预合并，请求阶段 O(1) 查找 |
@@ -631,14 +642,14 @@ caddyguard/
 ├── adapter.go             # caddyguardfile 适配器（全局自动注入 Guard handler）
 ├── matcher.go             # 正则匹配引擎（预编译 + (?i) 大小写不敏感 + []byte 直接匹配 + 关键词预过滤）
 ├── storage.go             # CC 存储（64 分片 + 滑动窗口 + 内存上限）
-├── logger.go              # 异步日志（buffered channel + worker）
+├── logger.go              # 同步日志（sync.Mutex + 文件句柄复用 + 100MB 轮转）
 ├── request_context.go     # 请求上下文缓存（clientIP, URI）
 ├── utils.go               # 辅助工具函数
 ├── detector_ip.go         # IP 黑白名单检测（IPv4/IPv6 CIDR + glob + 精确匹配）
 ├── detector_url.go        # URL 路径 + URL 参数检测
 ├── detector_ua.go         # User-Agent 检测（黑名单 + 白名单）
 ├── detector_cookie.go     # Cookie 注入检测
-├── detector_post.go       # POST body 检测（跳过 multipart + []byte 直接匹配 + 关键词预过滤内置 matchRulesBytes）
+├── detector_post.go       # POST body 检测（Content-Type 分流 + 大 body 超限拦截 + multipart_streaming_check 开关 + 关键词预过滤）
 ├── detector_cc.go         # CC 攻击检测（64 分片滑动窗口）
 ├── detector_referer.go    # Referer 检测
 ├── detector_fileupload.go # 文件上传扩展名检测
