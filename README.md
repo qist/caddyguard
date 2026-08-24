@@ -221,7 +221,7 @@ caddy run --config /etc/caddy/caddy.json
 | `cc_block_ttl` | int | `600` | CC 触发后封禁时长（秒） |
 | `white_ip_check` | string | `"on"` | IP 白名单检测开关 |
 | `white_ua_check` | string | `"on"` | UA 白名单检测开关 |
-| `white_url_check` | string | `"on"` | URL 白名单检测开关 |
+| `white_url_check` | string | `"on"` | URL 白名单检测开关。命中后**不再全局放行**，仅跳过指定检测项（默认跳过 URL 路径检测） |
 | `black_ip_check` | string | `"on"` | IP 黑名单检测开关 |
 | `referer_check` | string | `"off"` | Referer 检测开关 |
 | `file_upload_check` | string | `"on"` | 文件上传扩展名检测开关 |
@@ -326,6 +326,34 @@ Baiduspider
 bingbot
 360Spider
 YandexBot
+
+# whiteurl.rule — URL 白名单（支持两种格式）
+# 1. 纯路径格式（默认只跳过 url_attack URL路径检测，其他检测照常执行）：
+/123/
+/static/
+
+# 2. 扩展格式（指定跳过的检测项，逗号分隔）：
+/legacy/ user_agent,referer,url_attack,url_args
+/api/old/ post,cookie
+
+# 可用检测项：
+#   user_agent   - User-Agent 检测
+#   referer      - Referer 检测
+#   url_attack   - URL 路径检测
+#   url_args     - URL 参数检测
+#   cookie       - Cookie 检测
+#   post         - POST body 检测
+#   file_upload  - 文件上传扩展名检测
+#   cc           - CC 攻击限速检测
+#
+# 路径匹配方式：
+#   - 纯路径规则（不含正则元字符）：前缀匹配，如 /static/ 匹配 /static/css/app.css
+#   - 正则规则（含正则元字符如 ^ $）：正则匹配，如 ^/api$ 精确匹配 /api
+#
+# 安全建议：
+#   - 精确匹配路径用 $ 锚定结尾，如 /ipinfo$ 只匹配 /ipinfo，不匹配 /ipinfo-delete
+#   - 匹配子路径用末尾 /，如 /static/ 只匹配 /static/xxx，不匹配 /staticxxx
+#   - 避免使用不含 / 结尾的纯路径规则，如 /ipinfo 会误匹配 /ipinfoadmin
 ```
 
 ### IP 规则文件格式
@@ -411,7 +439,7 @@ YandexBot
 | 白名单 | 文件 | 行为 | 说明 |
 |--------|------|------|------|
 | **白名单 IP** | `whiteip.rule` | **全局放行**，跳过全部 12 项检测 | 信任 IP，完全不做任何安全检测 |
-| **白名单 URL** | `whiteurl.rule` | **全局放行**，跳过全部 12 项检测 | 信任 URL 路径，完全不做任何安全检测 |
+| **白名单 URL** | `whiteurl.rule` | **仅跳过指定检测项**（默认只跳过 URL 路径检测），其他检测照常 | 可配置跳过哪些检测项，避免全局放行的安全风险 |
 | **白名单 UA** | `whiteua.rule` | **仅跳过 UA 黑名单检测**，其他检测照常 | 搜索引擎蜘蛛免被 UA 黑名单误杀，但仍受 URL/参数/POST 等检测约束 |
 
 ## 检测链
@@ -421,17 +449,17 @@ YandexBot
 | 顺序 | 检测项 | 来源 | 说明 |
 |------|--------|------|------|
 | 1 | 白名单 IP | `whiteip.rule` | 命中则**放行**，跳过所有后续检测 |
-| 2 | 白名单 URL | `whiteurl.rule` | 命中则**放行**，跳过所有后续检测 |
-| 3 | 动态黑名单 IP | CC 自动拉黑 | CC 触发后自动封禁的 IP |
-| 4 | 静态黑名单 IP | `blackip.rule` | 手动配置的 IP 黑名单 |
-| 5 | CC 攻击 | 实时计数 | 64 分片滑动窗口计数 |
-| 6 | User-Agent | `useragent.rule` | 恶意扫描器/工具 UA（白名单 UA 仅跳过此项） |
-| 7 | URL 路径 | `url.rule` | 路径遍历、敏感文件、管理后台等 |
-| 8 | URL 参数 | `args.rule` | SQL 注入、XSS、SSTI、RCE 等 |
-| 9 | Cookie | `cookie.rule` | Cookie 注入 |
-| 10 | Referer | `referer.rule` | 恶意来源、支付接口保护 |
-| 11 | POST body | `post.rule` | 需读取 body；关键词自动提取预过滤跳过正常请求；multipart 默认跳过（由 `multipart_streaming_check` 控制）；空规则不读取 body |
-| 12 | 文件上传 | `fileext.rule` | 需解析 multipart，最昂贵；Content-Type 大小写不敏感匹配 |
+| 2 | 动态黑名单 IP | CC 自动拉黑 | CC 触发后自动封禁的 IP |
+| 3 | 静态黑名单 IP | `blackip.rule` | 手动配置的 IP 黑名单 |
+| 4 | 白名单 URL | `whiteurl.rule` | 返回跳过的检测项集合，**不再全局放行**；纯路径默认只跳过 URL 路径检测，扩展格式可指定跳过哪些检测项 |
+| 5 | User-Agent | `useragent.rule` | 恶意扫描器/工具 UA（白名单 UA 仅跳过此项；白名单 URL 可指定跳过） |
+| 6 | Referer | `referer.rule` | 恶意来源、支付接口保护（白名单 URL 可指定跳过） |
+| 7 | CC 攻击 | 实时计数 | 64 分片滑动窗口计数（白名单 URL 可指定跳过） |
+| 8 | [非 bodyless] 文件上传 | `fileext.rule` | 需解析 multipart，最昂贵；Content-Type 大小写不敏感匹配（白名单 URL 可指定跳过） |
+| 9 | URL 路径 | `url.rule` | 路径遍历、敏感文件、管理后台等（纯路径白名单默认跳过此项） |
+| 10 | URL 参数 | `args.rule` | SQL 注入、XSS、SSTI、RCE 等（白名单 URL 可指定跳过） |
+| 11 | Cookie | `cookie.rule` | Cookie 注入（白名单 URL 可指定跳过） |
+| 12 | [非 bodyless] POST body | `post.rule` | 需读取 body；关键词自动提取预过滤跳过正常请求；multipart 默认跳过（由 `multipart_streaming_check` 控制）；空规则不读取 body（白名单 URL 可指定跳过） |
 
 ## 热加载
 

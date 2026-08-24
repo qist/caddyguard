@@ -1,1 +1,4 @@
+# 域名级白名单URL配置 (whiteurl.rule)
+# 格式同全局 whiteurl.rule
+
 /123/

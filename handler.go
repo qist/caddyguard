@@ -11,15 +11,15 @@ import (
 //  1. 白名单 IP → 放行
 //  2. 动态黑名单（CC 自动拉黑期内）
 //  3. 静态黑名单 IP
-//  4. 白名单 URL → 放行（跳过后续所有检测）
-//  5. User-Agent 检测（白名单 UA 仅跳过此项）
-//  6. Referer 检测
-//  7. CC 攻击检测
-//  8. [非 bodyless] 文件上传检测
-//  9. URL 路径检测
-// 10. URL 参数检测
-// 11. Cookie 检测
-// 12. [非 bodyless] POST 检测
+//  4. 白名单 URL → 返回跳过的检测项集合（不再全局放行）
+//  5. User-Agent 检测（白名单 UA 仅跳过此项；白名单 URL 可指定跳过）
+//  6. Referer 检测（白名单 URL 可指定跳过）
+//  7. CC 攻击检测（白名单 URL 可指定跳过）
+//  8. [非 bodyless] 文件上传检测（白名单 URL 可指定跳过）
+//  9. URL 路径检测（纯路径白名单默认跳过此项；可指定跳过）
+// 10. URL 参数检测（白名单 URL 可指定跳过）
+// 11. Cookie 检测（白名单 URL 可指定跳过）
+// 12. [非 bodyless] POST 检测（白名单 URL 可指定跳过）
 //
 // 请求类型分叉（对应 Lua 的 is_bodyless_method 优化）：
 //   - bodyless="on" (默认): GET/HEAD/OPTIONS 跳过文件上传和 POST 检测
@@ -41,58 +41,72 @@ func (g *Guard) runChecks(w http.ResponseWriter, r *http.Request, cfg Config) bo
 		return true
 	}
 
-	// 4. 白名单 URL → 放行（跳过后续所有检测）
-	// 对应 Lua: if white_url_check() then return end
-	if g.whiteURLCheck(r, cfg) {
-		return false
-	}
+	// 4. 白名单 URL → 返回跳过的检测项集合（不再全局放行）
+	// 对应 Lua: local url_skips = white_url_check()
+	// 纯路径格式默认只跳过 url_attack；扩展格式可指定跳过哪些检测项
+	urlSkips := g.whiteURLCheck(r, cfg)
 
 	// 请求类型分叉：GET/HEAD/OPTIONS 跳过 body 相关检测
-	// 对应 Lua 的 is_bodyless_method: bodyless="on" 时 GET/HEAD/OPTIONS 跳过
-	// bodyless="off" 时所有方法都扫描 body（更严格）
 	method := r.Method
 	isBodyless := cfg.Bodyless != "off" && (method == "GET" || method == "HEAD" || method == "OPTIONS")
 
-	// 5. User-Agent 检测（白名单 UA 仅跳过此项）
-	if g.userAgentAttackCheck(w, r, cfg) {
-		return true
-	}
-
-	// 6. Referer 检测
-	if g.refererCheck(w, r, cfg) {
-		return true
-	}
-
-	// 7. CC 攻击检测
-	if g.ccAttackCheck(w, r, cfg) {
-		return true
-	}
-
-	// 8. [非 bodyless] 文件上传检测（需解析 multipart，最昂贵）
-	if !isBodyless {
-		if g.fileUploadCheck(w, r, cfg) {
+	// 5. User-Agent 检测（白名单 UA 仅跳过此项；白名单 URL 可指定跳过）
+	if !(urlSkips != nil && urlSkips.UserAgent) {
+		if g.userAgentAttackCheck(w, r, cfg) {
 			return true
 		}
 	}
 
-	// 9-10. URL 路径 + 参数检测
-	if g.urlAttackCheck(w, r, cfg) {
-		return true
+	// 6. Referer 检测
+	if !(urlSkips != nil && urlSkips.Referer) {
+		if g.refererCheck(w, r, cfg) {
+			return true
+		}
 	}
-	if g.urlArgsAttackCheck(w, r, cfg) {
-		return true
+
+	// 7. CC 攻击检测
+	if !(urlSkips != nil && urlSkips.CC) {
+		if g.ccAttackCheck(w, r, cfg) {
+			return true
+		}
+	}
+
+	// 8. [非 bodyless] 文件上传检测（需解析 multipart，最昂贵）
+	if !isBodyless {
+		if !(urlSkips != nil && urlSkips.FileUpload) {
+			if g.fileUploadCheck(w, r, cfg) {
+				return true
+			}
+		}
+	}
+
+	// 9. URL 路径检测（纯路径白名单默认跳过此项）
+	if !(urlSkips != nil && urlSkips.URLAttack) {
+		if g.urlAttackCheck(w, r, cfg) {
+			return true
+		}
+	}
+
+	// 10. URL 参数检测
+	if !(urlSkips != nil && urlSkips.URLArgs) {
+		if g.urlArgsAttackCheck(w, r, cfg) {
+			return true
+		}
 	}
 
 	// 11. Cookie 检测
-	// 对应 Lua：Cookie 检测移到 URL/Args 之后，攻击请求在 URL 阶段即短路返回
-	if g.cookieAttackCheck(w, r, cfg) {
-		return true
+	if !(urlSkips != nil && urlSkips.Cookie) {
+		if g.cookieAttackCheck(w, r, cfg) {
+			return true
+		}
 	}
 
 	// 12. [非 bodyless] POST 检测（需读取 body，最昂贵）
 	if !isBodyless {
-		if g.postAttackCheck(w, r, cfg) {
-			return true
+		if !(urlSkips != nil && urlSkips.Post) {
+			if g.postAttackCheck(w, r, cfg) {
+				return true
+			}
 		}
 	}
 

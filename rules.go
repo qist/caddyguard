@@ -22,6 +22,7 @@ type RuleCache struct {
 	files        map[string]*ruleFileEntry // key: filepath
 	domainJSON   *domainConfigEntry
 	globalConfig *globalConfigEntry // config.json 缓存
+	whiteURLFiles map[string]*whiteURLRuleEntry // key: filepath
 
 	// 热加载节流：上次检查 mtime 的时间
 	lastCheckNano int64 // atomic，上次 os.Stat 的时间戳（纳秒）
@@ -60,8 +61,9 @@ type globalConfigEntry struct {
 // NewRuleCache 创建规则缓存
 func NewRuleCache(ruleDir string) *RuleCache {
 	return &RuleCache{
-		ruleDir: ruleDir,
-		files:   make(map[string]*ruleFileEntry),
+		ruleDir:       ruleDir,
+		files:         make(map[string]*ruleFileEntry),
+		whiteURLFiles: make(map[string]*whiteURLRuleEntry),
 	}
 }
 
@@ -591,4 +593,188 @@ func mergeDomainConfig(base Config, domainCfg map[string]interface{}) Config {
 		cfg.PostBodyScanLimit = int64(v)
 	}
 	return cfg
+}
+
+// WhiteURLExtRule 扩展格式白名单规则：/path/ user_agent,referer,...
+type WhiteURLExtRule struct {
+	Path  string        // 路径前缀
+	Skips URLSkipChecks // 跳过的检测项
+}
+
+// WhiteURLRule 解析后的 whiteurl.rule
+// 对应 Lua 的 parse_whiteurl_extended 返回值
+type WhiteURLRule struct {
+	Plain    []string          // 纯路径规则（前缀匹配，默认只跳过 url_attack）
+	Extended []WhiteURLExtRule // 扩展格式规则（路径+跳过项）
+	Regex    []RuleEntry       // 正则规则（向后兼容复杂规则）
+}
+
+// whiteURLRuleEntry whiteurl.rule 的缓存条目
+type whiteURLRuleEntry struct {
+	modTime       int64
+	parsed        *WhiteURLRule
+	lastCheckNano int64 // atomic
+}
+
+// validSkipChecks 合法的跳过检测项名称
+var validSkipChecks = map[string]bool{
+	"user_agent":  true,
+	"referer":     true,
+	"url_attack":  true,
+	"url_args":    true,
+	"cookie":      true,
+	"post":        true,
+	"file_upload": true,
+	"cc":          true,
+}
+
+// parseWhiteURLRule 解析 whiteurl.rule 文件
+// 支持两种格式：
+//   - 纯路径 /path/           → 默认只跳过 url_attack
+//   - 扩展格式 /path/ ua,referer → 跳过指定检测项
+//
+// 以 # 开头为注释，空行忽略
+func parseWhiteURLRule(content string) *WhiteURLRule {
+	result := &WhiteURLRule{}
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// 尝试拆分路径和跳过项
+		parts := strings.SplitN(line, " ", 2)
+		path := parts[0]
+
+		if len(parts) == 2 {
+			// 扩展格式：/path/ check1,check2,...
+			skips := URLSkipChecks{}
+			valid := false
+			for _, name := range strings.Split(parts[1], ",") {
+				name = strings.TrimSpace(strings.ToLower(name))
+				if validSkipChecks[name] {
+					setSkipCheck(&skips, name, true)
+					valid = true
+				}
+			}
+			if valid {
+				result.Extended = append(result.Extended, WhiteURLExtRule{
+					Path:  path,
+					Skips: skips,
+				})
+			} else {
+				// 无效的跳过项，当作纯路径处理
+				result.Plain = append(result.Plain, path)
+			}
+		} else {
+			// 纯路径格式
+			// 判断是否是正则（含正则元字符）
+			if hasRegexMetachar(path) {
+				re, err := compileRegex(path)
+				if err != nil {
+					continue
+				}
+				reCI, _ := compileRegex("(?i)" + path)
+				keywords := extractKeywords(path)
+				result.Regex = append(result.Regex, RuleEntry{
+					Raw:      path,
+					Regex:    re,
+					RegexCI:  reCI,
+					Keywords: keywords,
+					IsPlain:  false,
+				})
+			} else {
+				result.Plain = append(result.Plain, path)
+			}
+		}
+	}
+	return result
+}
+
+// setSkipCheck 按名称设置跳过项
+func setSkipCheck(skips *URLSkipChecks, name string, val bool) {
+	switch name {
+	case "user_agent":
+		skips.UserAgent = val
+	case "referer":
+		skips.Referer = val
+	case "url_attack":
+		skips.URLAttack = val
+	case "url_args":
+		skips.URLArgs = val
+	case "cookie":
+		skips.Cookie = val
+	case "post":
+		skips.Post = val
+	case "file_upload":
+		skips.FileUpload = val
+	case "cc":
+		skips.CC = val
+	}
+}
+
+// GetWhiteURLRule 获取解析后的 whiteurl.rule（带 mtime 热加载缓存）
+// 对应 Lua 的 parse_whiteurl_extended + worker_whiteurl_cache
+func (rc *RuleCache) GetWhiteURLRule(domainRuleDir string) *WhiteURLRule {
+	// 1. 检查域名目录
+	if domainRuleDir != "" {
+		domainPath := resolveRuleDir(domainRuleDir, rc.ruleDir) + "/whiteurl.rule"
+		if parsed, exists := rc.loadWhiteURLCached(domainPath); exists {
+			return parsed
+		}
+	}
+	// 2. 回退全局目录
+	globalPath := rc.ruleDir + "/whiteurl.rule"
+	parsed, _ := rc.loadWhiteURLCached(globalPath)
+	return parsed
+}
+
+// loadWhiteURLCached 带缓存的 whiteurl.rule 读取
+func (rc *RuleCache) loadWhiteURLCached(filepath string) (*WhiteURLRule, bool) {
+	// 快速路径：先读锁检查缓存
+	rc.mu.RLock()
+	entry, ok := rc.whiteURLFiles[filepath]
+	rc.mu.RUnlock()
+
+	if ok {
+		if !shouldCheck(atomic.LoadInt64(&entry.lastCheckNano)) {
+			return entry.parsed, true
+		}
+	}
+
+	// 需要检查 mtime
+	mtime, exists := getFileMtime(filepath)
+	if !exists {
+		return nil, false
+	}
+
+	// 缓存命中
+	if ok && entry.modTime == mtime {
+		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
+		return entry.parsed, true
+	}
+
+	// 缓存未命中，读取文件
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+
+	// double check
+	if entry, ok := rc.whiteURLFiles[filepath]; ok && entry.modTime == mtime {
+		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
+		return entry.parsed, true
+	}
+
+	content, err := os.ReadFile(filepath)
+	if err != nil {
+		return nil, false
+	}
+
+	parsed := parseWhiteURLRule(string(content))
+	nowNano := time.Now().UnixNano()
+	rc.whiteURLFiles[filepath] = &whiteURLRuleEntry{
+		modTime:       mtime,
+		parsed:        parsed,
+		lastCheckNano: nowNano,
+	}
+	return parsed, true
 }

@@ -164,36 +164,107 @@ func (g *Guard) urlArgsAttackCheck(w http.ResponseWriter, r *http.Request, cfg C
 	return false
 }
 
+// URLSkipChecks 白名单 URL 命中后需要跳过的检测项集合
+// 对应 Lua 的 url_skips 表
+// 纯路径格式默认只跳过 url_attack；扩展格式可指定跳过哪些检测项
+type URLSkipChecks struct {
+	UserAgent  bool
+	Referer    bool
+	URLAttack  bool
+	URLArgs    bool
+	Cookie     bool
+	Post       bool
+	FileUpload bool
+	CC         bool
+}
+
+// defaultURLSkip 纯路径格式默认只跳过 url_attack
+var defaultURLSkip = URLSkipChecks{URLAttack: true}
+
 // whiteURLCheck 白名单 URL 检测
-// 命中 → 跳过所有检测（IP 白名单除外）
+// 命中 → 返回需要跳过的检测项集合（URLSkipChecks）
+// 未命中 → 返回 nil
 //
 // 对应 Lua 的 white_url_check：
-//   - 先匹配 URI path（r.URL.Path），这是最常见的白名单场景（如 /static/, /api/login）
-//   - 再匹配完整 request_uri（含 query string），兼容有意包含查询参数的白名单规则
-func (g *Guard) whiteURLCheck(r *http.Request, cfg Config) bool {
+//   - 纯路径格式 /path/          → 默认只跳过 url_attack
+//   - 扩展格式 /path/ ua,referer  → 跳过指定检测项
+//   - 纯路径规则用前缀匹配（HasPrefix），修复子串匹配安全漏洞
+//   - 正则规则用 MatchString（向后兼容复杂规则）
+func (g *Guard) whiteURLCheck(r *http.Request, cfg Config) *URLSkipChecks {
 	if cfg.WhiteURLCheck != "on" {
-		return false
+		return nil
 	}
-	rules := g.ruleCache.GetRule("whiteurl.rule", cfg.RuleDir)
-	if len(rules) == 0 {
-		return false
+	parsed := g.ruleCache.GetWhiteURLRule(cfg.RuleDir)
+	if parsed == nil || (len(parsed.Plain) == 0 && len(parsed.Extended) == 0) {
+		return nil
 	}
 
-	// 1. 先匹配 URI path（纯路径，不含 query string）
 	reqPath := r.URL.Path
-	if reqPath != "" {
-		if matched := matchRules(reqPath, rules, true); matched != nil {
-			return true
-		}
-	}
-
-	// 2. 再匹配完整 request_uri（含 query string），兼容含查询参数的白名单规则
 	fullURI := reqURICached(r)
-	if fullURI != "" && fullURI != reqPath {
-		if matched := matchRules(fullURI, rules, true); matched != nil {
-			return true
+
+	// 1. 扩展格式：前缀匹配，最长匹配优先
+	if reqPath != "" && len(parsed.Extended) > 0 {
+		var bestSkips *URLSkipChecks
+		bestLen := 0
+		for i := range parsed.Extended {
+			rule := &parsed.Extended[i]
+			if strings.HasPrefix(reqPath, rule.Path) {
+				if len(rule.Path) > bestLen {
+					bestSkips = &rule.Skips
+					bestLen = len(rule.Path)
+				}
+			}
+		}
+		if bestSkips != nil {
+			return bestSkips
+		}
+		// 也检查 fullURI（兼容含查询参数的扩展规则）
+		if fullURI != "" && fullURI != reqPath {
+			for i := range parsed.Extended {
+				rule := &parsed.Extended[i]
+				if strings.HasPrefix(fullURI, rule.Path) {
+					if len(rule.Path) > bestLen {
+						bestSkips = &rule.Skips
+						bestLen = len(rule.Path)
+					}
+				}
+			}
+			if bestSkips != nil {
+				return bestSkips
+			}
 		}
 	}
 
-	return false
+	// 2. 纯路径格式：前缀匹配（修复子串匹配安全漏洞）
+	if reqPath != "" {
+		for _, prefix := range parsed.Plain {
+			if strings.HasPrefix(reqPath, prefix) {
+				return &defaultURLSkip
+			}
+		}
+	}
+	// 也检查 fullURI
+	if fullURI != "" && fullURI != reqPath {
+		for _, prefix := range parsed.Plain {
+			if strings.HasPrefix(fullURI, prefix) {
+				return &defaultURLSkip
+			}
+		}
+	}
+
+	// 3. 正则规则（向后兼容复杂规则）
+	if len(parsed.Regex) > 0 {
+		if reqPath != "" {
+			if matched := matchRules(reqPath, parsed.Regex, true); matched != nil {
+				return &defaultURLSkip
+			}
+		}
+		if fullURI != "" && fullURI != reqPath {
+			if matched := matchRules(fullURI, parsed.Regex, true); matched != nil {
+				return &defaultURLSkip
+			}
+		}
+	}
+
+	return nil
 }
