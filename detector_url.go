@@ -202,17 +202,29 @@ func (g *Guard) whiteURLCheck(r *http.Request, cfg Config) *URLSkipChecks {
 	reqPath := r.URL.Path
 	fullURI := reqURICached(r)
 
-	// 1. 扩展格式：前缀匹配，最长匹配优先
+	// 1. 扩展格式：前缀匹配或正则匹配，最长匹配优先
 	if reqPath != "" && len(parsed.Extended) > 0 {
 		var bestSkips *URLSkipChecks
 		bestLen := 0
 		for i := range parsed.Extended {
 			rule := &parsed.Extended[i]
-			if strings.HasPrefix(reqPath, rule.Path) {
-				if len(rule.Path) > bestLen {
-					bestSkips = &rule.Skips
-					bestLen = len(rule.Path)
+			matched := false
+			if rule.IsRegex {
+				// 正则规则：用预编译的正则匹配
+				if rule.RegexCI != nil && rule.RegexCI.MatchString(reqPath) {
+					matched = true
+				} else if rule.Regex != nil && rule.Regex.MatchString(reqPath) {
+					matched = true
 				}
+			} else {
+				// 普通路径：前缀匹配
+				if strings.HasPrefix(reqPath, rule.Path) {
+					matched = true
+				}
+			}
+			if matched && len(rule.Path) > bestLen {
+				bestSkips = &rule.Skips
+				bestLen = len(rule.Path)
 			}
 		}
 		if bestSkips != nil {
@@ -222,11 +234,21 @@ func (g *Guard) whiteURLCheck(r *http.Request, cfg Config) *URLSkipChecks {
 		if fullURI != "" && fullURI != reqPath {
 			for i := range parsed.Extended {
 				rule := &parsed.Extended[i]
-				if strings.HasPrefix(fullURI, rule.Path) {
-					if len(rule.Path) > bestLen {
-						bestSkips = &rule.Skips
-						bestLen = len(rule.Path)
+				matched := false
+				if rule.IsRegex {
+					if rule.RegexCI != nil && rule.RegexCI.MatchString(fullURI) {
+						matched = true
+					} else if rule.Regex != nil && rule.Regex.MatchString(fullURI) {
+						matched = true
 					}
+				} else {
+					if strings.HasPrefix(fullURI, rule.Path) {
+						matched = true
+					}
+				}
+				if matched && len(rule.Path) > bestLen {
+					bestSkips = &rule.Skips
+					bestLen = len(rule.Path)
 				}
 			}
 			if bestSkips != nil {

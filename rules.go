@@ -596,9 +596,13 @@ func mergeDomainConfig(base Config, domainCfg map[string]interface{}) Config {
 }
 
 // WhiteURLExtRule 扩展格式白名单规则：/path/ user_agent,referer,...
+// 如果 Path 含正则元字符，用 Regex 匹配；否则用 HasPrefix 前缀匹配
 type WhiteURLExtRule struct {
-	Path  string        // 路径前缀
-	Skips URLSkipChecks // 跳过的检测项
+	Path    string         // 原始路径规则
+	Regex   *regexp.Regexp // 预编译正则（Path 含正则元字符时）
+	RegexCI *regexp.Regexp // 大小写不敏感版本
+	IsRegex bool           // 是否为正则规则
+	Skips   URLSkipChecks  // 跳过的检测项
 }
 
 // WhiteURLRule 解析后的 whiteurl.rule
@@ -658,10 +662,17 @@ func parseWhiteURLRule(content string) *WhiteURLRule {
 				}
 			}
 			if valid {
-				result.Extended = append(result.Extended, WhiteURLExtRule{
+				rule := WhiteURLExtRule{
 					Path:  path,
 					Skips: skips,
-				})
+				}
+				// 如果路径含正则元字符，预编译正则
+				if hasRegexMetachar(path) {
+					rule.IsRegex = true
+					rule.Regex, _ = compileRegex(path)
+					rule.RegexCI, _ = compileRegex("(?i)" + path)
+				}
+				result.Extended = append(result.Extended, rule)
 			} else {
 				// 无效的跳过项，当作纯路径处理
 				result.Plain = append(result.Plain, path)
