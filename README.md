@@ -232,6 +232,8 @@ caddy run --config /etc/caddy/caddy.json
 | `waf_output` | string | `"html"` | 拦截响应模式：`"html"` 返回拦截页面，`"redirect"` 302 跳转 |
 | `waf_redirect_url` | string | - | `waf_output` 为 redirect 时的跳转 URL |
 
+> **完整配置参数参考**：上表中的所有参数均可作为 `config.json`（全局配置）和 `domain.json`（域名级覆盖）的键名。`config.json` 中配置全局默认值，`domain.json` 中按域名只列出需要覆盖的项，未列出的项自动回退到全局配置。`rule_dir` 仅在 `domain.json` 中使用（指定域名专用规则目录），`log_dir` 仅在 `config.json` 中使用（全局日志目录）。
+
 ### domain.json 域名级覆盖
 
 ```json
@@ -335,6 +337,7 @@ YandexBot
 # 2. 扩展格式（指定跳过的检测项，逗号分隔）：
 /legacy/ user_agent,referer,url_attack,url_args
 /api/old/ post,cookie
+/ipinfo$ user_agent              # 正则路径 + 指定跳过项
 
 # 可用检测项：
 #   user_agent   - User-Agent 检测
@@ -346,12 +349,13 @@ YandexBot
 #   file_upload  - 文件上传扩展名检测
 #   cc           - CC 攻击限速检测
 #
-# 路径匹配方式：
+# 路径匹配方式（纯路径和扩展格式均支持）：
 #   - 纯路径规则（不含正则元字符）：前缀匹配，如 /static/ 匹配 /static/css/app.css
-#   - 正则规则（含正则元字符如 ^ $）：正则匹配，如 ^/api$ 精确匹配 /api
+#   - 正则规则（含正则元字符如 ^ $）：正则匹配，如 /ipinfo$ 精确匹配 /ipinfo
+#   - 两种格式都可使用正则路径，如 /ipinfo$ user_agent 同时支持正则匹配和跳过指定检测项
 #
 # 安全建议：
-#   - 精确匹配路径用 $ 锚定结尾，如 /ipinfo$ 只匹配 /ipinfo，不匹配 /ipinfo-delete
+#   - 精确匹配路径用 $ 锚定结尾，如 /ipinfo$ 只匹配 /ipinfo，不匹配 /ipinfoadmin
 #   - 匹配子路径用末尾 /，如 /static/ 只匹配 /static/xxx，不匹配 /staticxxx
 #   - 避免使用不含 / 结尾的纯路径规则，如 /ipinfo 会误匹配 /ipinfoadmin
 ```
