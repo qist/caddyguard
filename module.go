@@ -14,6 +14,11 @@ import (
 	"go.uber.org/zap"
 )
 
+// wafDisabledCtxKey 用于在 request context 中传递 WAF 已关闭的标记
+// 当外层 caddyguard 判定 waf_enable=off 后设置此标记，
+// 内层 subroute 的 caddyguard 看到此标记直接跳过，避免 Host 改写后重复检测
+type wafDisabledCtxKey struct{}
+
 func init() {
 	caddy.RegisterModule(&Guard{})
 	caddy.RegisterModule(&GuardApp{})
@@ -201,9 +206,17 @@ func (g *Guard) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp
 		}
 	}()
 
+	// 如果外层 caddyguard 已判定 WAF 关闭，直接跳过（处理 subroute 中 Host 改写后重复检测的问题）
+	if _, disabled := r.Context().Value(wafDisabledCtxKey{}).(bool); disabled {
+		return next.ServeHTTP(w, r)
+	}
+
 	cfg := g.GetEffectiveConfig(r)
 	// 站点级 WAF 总开关（Caddyfile 中配置的 waf_enable off 优先于 config.json）
 	if g.WAFEnable == "off" || cfg.WAFEnable == "off" {
+		// 在 request context 中标记 WAF 已关闭，内层 subroute 的 caddyguard 直接跳过
+		ctx := context.WithValue(r.Context(), wafDisabledCtxKey{}, true)
+		r = r.WithContext(ctx)
 		return next.ServeHTTP(w, r)
 	}
 	blocked := g.runChecks(w, r, cfg)
