@@ -18,6 +18,6 @@
 		respond "webhook-ok" 200
 	}
 
-	# 默认路由（走 WAF）
-	reverse_proxy 127.0.0.1:8080
+	# 默认路由（走 WAF，后端端口与 Caddyfile.backend 一致）
+	reverse_proxy 127.0.0.1:8889
 }

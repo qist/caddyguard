@@ -165,6 +165,26 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 					}
 				}
 			}
+			// 兜底：'&' 分隔符会把 &#x3c;script&#x3e; 这类实体拆散成无害片段，
+			// 仅当原始 body 含实体/JS 转义标记（&# / \u / \x）时才回扫 raw body，
+			// 正常表单流量不含这些标记，快速路径零额外开销
+			// 对应 Lua: 原始 body 含标记时 match_rule_entry(raw) → full_decode 后重试
+			rawBody := string(bodyBytes)
+			if strings.Contains(rawBody, "&#") || strings.Contains(rawBody, "\\u") || strings.Contains(rawBody, "\\x") {
+				rawMatched := matchRulesBytes(bodyBytes, rules, true)
+				if rawMatched == nil {
+					if decoded, changed := fullDecode(rawBody); changed {
+						rawMatched = matchRules(decoded, rules, true)
+					}
+				}
+				if rawMatched != nil {
+					g.logger.Record("POST", reqURICached(r), "-", rawMatched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+					if wafEnabled {
+						g.wafOutput(w, cfg)
+					}
+					return true
+				}
+			}
 			// form-urlencoded 已经通过 key/value 完整检测，跳过 raw body 二次扫描
 			// 对应 Lua: if is_form_urlencoded and POST_ARGS_ERR ~= "truncated" then return false end
 			return false

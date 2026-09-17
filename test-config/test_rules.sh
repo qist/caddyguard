@@ -119,8 +119,9 @@ test_rule "POST SSTI" 403 -H "User-Agent: Mozilla/5.0" -d 'x={{__class__}}' "$TA
 test_rule "POST NoSQL \$eq(" 403 -H "User-Agent: Mozilla/5.0" -d 'x=$eq(1)' "$TARGET/"
 test_rule "POST sleep()" 403 -H "User-Agent: Mozilla/5.0" -d "id=sleep(5)" "$TARGET/"
 test_rule "POST javascript:" 403 -H "User-Agent: Mozilla/5.0" -d "q=javascript:alert(1)" "$TARGET/"
-test_rule "POST CONCAT()" 403 -H "User-Agent: Mozilla/5.0" -d 'x=CONCAT(user(),0x3a)' "$TARGET/"
-test_rule "POST concat() lowercase" 403 -H "User-Agent: Mozilla/5.0" -d 'x=concat(user(),0x3a)' "$TARGET/"
+test_rule "POST CONCAT() high-FP removed" 200 -H "User-Agent: Mozilla/5.0" -d 'x=CONCAT(user(),0x3a)' "$TARGET/"
+test_rule "POST extractvalue+concat SQL" 403 -H "User-Agent: Mozilla/5.0" -d "q=extractvalue(1,concat(0x7e,user()))" "$TARGET/"
+test_rule "POST concat() lowercase high-FP removed" 200 -H "User-Agent: Mozilla/5.0" -d 'x=concat(user(),0x3a)' "$TARGET/"
 
 # ===== 正常 POST（期望 200）=====
 echo "--- 正常 POST（不命中规则）---"

@@ -11,6 +11,7 @@ type ctxKey int
 const (
 	keyClientIP ctxKey = iota
 	keyReqURI
+	keyHeaderText
 )
 
 // getClientIPCached 从 context 缓存中获取 clientIP，未缓存则计算并存入

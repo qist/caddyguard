@@ -117,7 +117,7 @@ child_process
 mosconfig\[a-z0-9_]{1,200}=
 `
 
-	rules := parseAndCompileRules(content)
+	rules := parseAndCompileRules(content, false)
 	if len(rules) != 8 {
 		t.Fatalf("expected 8 rules, got %d", len(rules))
 	}
@@ -163,7 +163,7 @@ func TestMatchRulesBytesWithKeywordPrefilter(t *testing.T) {
 	rules := parseAndCompileRules(`base64_decode\(
 select.+(from|limit)
 child_process
-`)
+`, false)
 
 	// 正常 body 不包含任何关键词 → 不应命中
 	normalBody := []byte(`{"name":"hello","age":30,"city":"Beijing"}`)

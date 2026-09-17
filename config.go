@@ -15,6 +15,7 @@ type Config struct {
 	URLCheck        string `json:"url_check"`         // URL 路径检测开关
 	URLArgsCheck    string `json:"url_args_check"`    // URL 参数检测开关
 	UserAgentCheck  string `json:"user_agent_check"`  // UA 攻击检测开关
+	HeaderCheck     string `json:"header_check"`      // 请求头检测开关（header.rule）
 	CookieCheck     string `json:"cookie_check"`      // Cookie 检测开关
 	CCCheck         string `json:"cc_check"`          // CC 攻击检测开关
 	CCRate          string `json:"cc_rate"`           // CC 速率 "60/60"（次数/秒数）
@@ -52,6 +53,7 @@ func DefaultConfig() Config {
 		URLCheck:          "on",
 		URLArgsCheck:      "on",
 		UserAgentCheck:    "on",
+		HeaderCheck:       "on",
 		CookieCheck:       "on",
 		CCCheck:           "on",
 		CCRate:            "60/60",

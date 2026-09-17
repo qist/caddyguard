@@ -57,21 +57,28 @@ func (g *Guard) runChecks(w http.ResponseWriter, r *http.Request, cfg Config) bo
 		}
 	}
 
-	// 6. Referer 检测
+	// 6. 请求头检测（header.rule：绕过类头 / SSRF 元数据头 / Log4Shell 头）
+	if !(urlSkips != nil && urlSkips.Header) {
+		if g.headerAttackCheck(w, r, cfg) {
+			return true
+		}
+	}
+
+	// 7. Referer 检测
 	if !(urlSkips != nil && urlSkips.Referer) {
 		if g.refererCheck(w, r, cfg) {
 			return true
 		}
 	}
 
-	// 7. CC 攻击检测
+	// 8. CC 攻击检测
 	if !(urlSkips != nil && urlSkips.CC) {
 		if g.ccAttackCheck(w, r, cfg) {
 			return true
 		}
 	}
 
-	// 8. [非 bodyless] 文件上传检测（需解析 multipart，最昂贵）
+	// 9. [非 bodyless] 文件上传检测（需解析 multipart，最昂贵）
 	if !isBodyless {
 		if !(urlSkips != nil && urlSkips.FileUpload) {
 			if g.fileUploadCheck(w, r, cfg) {
@@ -80,28 +87,28 @@ func (g *Guard) runChecks(w http.ResponseWriter, r *http.Request, cfg Config) bo
 		}
 	}
 
-	// 9. URL 路径检测（纯路径白名单默认跳过此项）
+	// 10. URL 路径检测（纯路径白名单默认跳过此项）
 	if !(urlSkips != nil && urlSkips.URLAttack) {
 		if g.urlAttackCheck(w, r, cfg) {
 			return true
 		}
 	}
 
-	// 10. URL 参数检测
+	// 11. URL 参数检测
 	if !(urlSkips != nil && urlSkips.URLArgs) {
 		if g.urlArgsAttackCheck(w, r, cfg) {
 			return true
 		}
 	}
 
-	// 11. Cookie 检测
+	// 12. Cookie 检测
 	if !(urlSkips != nil && urlSkips.Cookie) {
 		if g.cookieAttackCheck(w, r, cfg) {
 			return true
 		}
 	}
 
-	// 12. [非 bodyless] POST 检测（需读取 body，最昂贵）
+	// 13. [非 bodyless] POST 检测（需读取 body，最昂贵）
 	if !isBodyless {
 		if !(urlSkips != nil && urlSkips.Post) {
 			if g.postAttackCheck(w, r, cfg) {

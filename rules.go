@@ -30,9 +30,10 @@ type RuleCache struct {
 
 // ruleFileEntry 存储预编译后的规则
 type ruleFileEntry struct {
-	modTime int64       // Unix mtime (秒)
-	rules   []RuleEntry // 预编译后的规则列表
-	exists  bool        // 文件是否存在
+	modTime   int64       // Unix mtime (秒)
+	rules     []RuleEntry // 预编译后的规则列表
+	exists    bool        // 文件是否存在
+	multiline bool        // 是否按多行模式 (?m) 编译（header.rule）
 	// 热加载节流：上次检查此文件 mtime 的时间
 	lastCheckNano int64 // atomic
 }
@@ -89,30 +90,34 @@ func shouldCheck(lastCheckNano int64) bool {
 //     空文件代表「此域名关闭该规则」，而非「使用全局规则」
 //  3. 文件不存在 → 回退全局目录
 func (rc *RuleCache) GetRule(filename string, domainRuleDir string) []RuleEntry {
+	// header.rule 的检测对象是 "Name: value" 多行文本，需要 (?m) 多行模式
+	multiline := multilineRuleFiles[filename]
+
 	// 1. 检查域名目录
 	if domainRuleDir != "" {
 		domainPath := resolveRuleDir(domainRuleDir, rc.ruleDir) + "/" + filename
-		rules, exists := rc.loadCached(domainPath)
+		rules, exists := rc.loadCached(domainPath, multiline)
 		if exists {
 			return rules // 文件存在（即使为空也返回）
 		}
 	}
 	// 2. 回退全局目录
 	globalPath := rc.ruleDir + "/" + filename
-	rules, _ := rc.loadCached(globalPath)
+	rules, _ := rc.loadCached(globalPath, multiline)
 	return rules
 }
 
 // loadCached 带缓存的文件读取
 // 缓存策略：比较 mtime，mtime 未变则用缓存
 // 热加载节流：在 hotReloadInterval 内跳过 os.Stat，直接用缓存
-func (rc *RuleCache) loadCached(filepath string) ([]RuleEntry, bool) {
+// multiline=true 时按 (?m) 多行模式预编译（header.rule 专用）
+func (rc *RuleCache) loadCached(filepath string, multiline bool) ([]RuleEntry, bool) {
 	// 快速路径：先读锁检查缓存是否可用（跳过 os.Stat）
 	rc.mu.RLock()
 	entry, ok := rc.files[filepath]
 	rc.mu.RUnlock()
 
-	if ok {
+	if ok && entry.multiline == multiline {
 		// 检查是否在节流窗口内
 		if !shouldCheck(atomic.LoadInt64(&entry.lastCheckNano)) {
 			// 节流窗口内，直接用缓存
@@ -126,8 +131,8 @@ func (rc *RuleCache) loadCached(filepath string) ([]RuleEntry, bool) {
 		return nil, false
 	}
 
-	// 缓存命中（mtime 未变）
-	if ok && entry.modTime == mtime {
+	// 缓存命中（mtime 未变且编译模式一致）
+	if ok && entry.modTime == mtime && entry.multiline == multiline {
 		// 更新最后检查时间
 		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
 		return entry.rules, true
@@ -138,7 +143,7 @@ func (rc *RuleCache) loadCached(filepath string) ([]RuleEntry, bool) {
 	defer rc.mu.Unlock()
 
 	// double check
-	if entry, ok := rc.files[filepath]; ok && entry.modTime == mtime {
+	if entry, ok := rc.files[filepath]; ok && entry.modTime == mtime && entry.multiline == multiline {
 		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
 		return entry.rules, true
 	}
@@ -149,18 +154,26 @@ func (rc *RuleCache) loadCached(filepath string) ([]RuleEntry, bool) {
 		return nil, false
 	}
 
-	rules := parseAndCompileRules(string(content))
+	rules := parseAndCompileRules(string(content), multiline)
 	nowNano := time.Now().UnixNano()
 	rc.files[filepath] = &ruleFileEntry{
 		modTime:       mtime,
 		rules:         rules,
 		exists:        true,
+		multiline:     multiline,
 		lastCheckNano: nowNano,
 	}
 	return rules, true
 }
 
-// parseAndCompileRules 按行解析规则文件，空行跳过
+// multilineRuleFiles 需要多行模式 (?m) 编译的规则文件
+// header.rule 的检测对象是所有请求头拼接成的 "Name: value" 多行文本，
+// 规则中的 ^ 需要锚定任意一行行首（对应 Lua 的 "joim" 匹配标志）
+var multilineRuleFiles = map[string]bool{
+	"header.rule": true,
+}
+
+// parseAndCompileRules 按行解析规则文件，空行和 # 注释行跳过
 // 每条规则在加载阶段预编译为 *regexp.Regexp，并提取字面量关键词用于预过滤
 // 编译失败的规则跳过
 // hasRegexMetachar 检查规则是否包含正则元字符
@@ -170,23 +183,32 @@ func hasRegexMetachar(s string) bool {
 	return strings.ContainsAny(s, `()%.[]{}*+?^$|\`)
 }
 
-func parseAndCompileRules(content string) []RuleEntry {
+func parseAndCompileRules(content string, multiline bool) []RuleEntry {
 	var rules []RuleEntry
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" {
+		// 跳过空行和 # 注释行
+		// 对应 Lua lib.lua read_rule_file: 跳过 ^%s*# 开头的说明性注释，
+		// 避免注释文本被当成正则规则参与匹配
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		// 判断是否是纯字符串规则（不含正则元字符）
 		isPlain := !hasRegexMetachar(line)
 
+		// 多行模式前缀（header.rule）：^ / $ 锚定每行行首行尾
+		prefix := ""
+		if multiline {
+			prefix = "(?m)"
+		}
+
 		// 预编译正则（大小写敏感模式）
-		re, err := compileRegex(line)
+		re, err := compileRegex(prefix + line)
 		if err != nil {
 			continue
 		}
 		// 预编译大小写不敏感版本（(?i) 前缀）
-		reCI, _ := compileRegex("(?i)" + line)
+		reCI, _ := compileRegex(prefix + "(?i)" + line)
 		// 提取字面量关键词用于快速预过滤
 		keywords := extractKeywords(line)
 		rules = append(rules, RuleEntry{
@@ -552,6 +574,9 @@ func mergeDomainConfig(base Config, domainCfg map[string]interface{}) Config {
 	if v, ok := domainCfg["user_agent_check"].(string); ok && v != "" {
 		cfg.UserAgentCheck = v
 	}
+	if v, ok := domainCfg["header_check"].(string); ok && v != "" {
+		cfg.HeaderCheck = v
+	}
 	if v, ok := domainCfg["cookie_check"].(string); ok && v != "" {
 		cfg.CookieCheck = v
 	}
@@ -623,6 +648,7 @@ type whiteURLRuleEntry struct {
 // validSkipChecks 合法的跳过检测项名称
 var validSkipChecks = map[string]bool{
 	"user_agent":  true,
+	"header":      true,
 	"referer":     true,
 	"url_attack":  true,
 	"url_args":    true,
@@ -707,6 +733,8 @@ func setSkipCheck(skips *URLSkipChecks, name string, val bool) {
 	switch name {
 	case "user_agent":
 		skips.UserAgent = val
+	case "header":
+		skips.Header = val
 	case "referer":
 		skips.Referer = val
 	case "url_attack":

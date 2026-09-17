@@ -4,5 +4,5 @@
 
 # A: Caddy + reverse_proxy（无 WAF）
 :8888 {
-	reverse_proxy 127.0.0.1:8080
+	reverse_proxy 127.0.0.1:8889
 }

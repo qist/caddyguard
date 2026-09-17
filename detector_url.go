@@ -169,6 +169,7 @@ func (g *Guard) urlArgsAttackCheck(w http.ResponseWriter, r *http.Request, cfg C
 // 纯路径格式默认只跳过 url_attack；扩展格式可指定跳过哪些检测项
 type URLSkipChecks struct {
 	UserAgent  bool
+	Header     bool
 	Referer    bool
 	URLAttack  bool
 	URLArgs    bool

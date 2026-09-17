@@ -197,7 +197,7 @@ func (g *Guard) getCompiledIPRules(filename string, domainRuleDir string) *ipRul
 		return nil
 	}
 
-	rules := parseAndCompileRules(string(content))
+	rules := parseAndCompileRules(string(content), false)
 	if len(rules) == 0 {
 		// 文件存在但为空 → 返回空 ruleSet（hasRules=false）
 		rs := &ipRuleSet{exactSet: make(map[string]bool)}

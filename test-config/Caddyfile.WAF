@@ -5,7 +5,7 @@
 	}
 }
 
-# B-F: Caddy + CaddyGuard + reverse_proxy
+# B-F: Caddy + CaddyGuard + reverse_proxy（后端端口与 Caddyfile.backend 保持一致）
 :8888 {
-	reverse_proxy 127.0.0.1:8080
+	reverse_proxy 127.0.0.1:8889
 }

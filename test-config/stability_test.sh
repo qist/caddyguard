@@ -18,7 +18,7 @@ start_caddy() {
     ssh 192.168.2.180 'pkill -f "caddy run" 2>/dev/null; sleep 1'
     ssh 192.168.2.180 'nohup /opt/caddyguard/caddy run --config /opt/caddyguard/test-config/Caddyfile.backend --adapter caddyfile > /tmp/caddy_backend.log 2>&1 &'
     sleep 1
-    ssh 192.168.2.180 'nohup /opt/caddyguard/caddy run --config /opt/caddyguard/test-config/Caddyfile.WAF --adapter caddyfile > /tmp/caddy_waf.log 2>&1 &'
+    ssh 192.168.2.180 'nohup /opt/caddyguard/caddy run --config /opt/caddyguard/test-config/Caddyfile.WAF --adapter caddyguardfile > /tmp/caddy_waf.log 2>&1 &'
     sleep 2
     code=$(curl -s -m 5 -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0" "$TARGET")
     if [ "$code" = "200" ]; then
@@ -269,11 +269,11 @@ log "  重启 WAF Caddy..."
 # 用精确 PID 重启，不影响后端
 WAF_PID=$(ssh 192.168.2.180 'pgrep -f "Caddyfile.WAF"')
 log "  WAF PID: $WAF_PID"
-ssh 192.168.2.180 "kill $WAF_PID 2>/dev/null; sleep 1; nohup /opt/caddyguard/caddy run --config /opt/caddyguard/test-config/Caddyfile.WAF --adapter caddyfile > /tmp/caddy_waf.log 2>&1 &"
+ssh 192.168.2.180 "kill $WAF_PID 2>/dev/null; sleep 1; nohup /opt/caddyguard/caddy run --config /opt/caddyguard/test-config/Caddyfile.WAF --adapter caddyguardfile > /tmp/caddy_waf.log 2>&1 &"
 sleep 3
 
 # 确认后端还在
-BACKEND_CODE=$(curl -s -m 3 -o /dev/null -w "%{http_code}" "http://192.168.2.180:8080/")
+BACKEND_CODE=$(curl -s -m 3 -o /dev/null -w "%{http_code}" "http://192.168.2.180:8889/")
 log "  后端状态: HTTP $BACKEND_CODE"
 if [ "$BACKEND_CODE" != "200" ]; then
     log "  后端掉了，重启后端..."
@@ -386,7 +386,7 @@ declare -A ATTACKS=(
     ["sqlmap UA"]="UA:sqlmap/1.0"
     ["nmap UA"]="UA:nmap/1.0"
     ["dirb UA"]="UA:dirb/1.0"
-    ["Cookie注入"]="COOKIE:session=union+select"
+    ["Cookie注入"]="COOKIE:session=union select from users"
     ["POST SQL注入"]="POST:id=1+union+select"
 )
 

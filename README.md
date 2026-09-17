@@ -5,7 +5,7 @@ Caddy v2 WAF (Web Application Firewall) 插件 — 用 Go 原生编写，为 Cad
 ## 特性
 
 - **全局自动生效**：全局配置一次 `rule_dir`，所有站点自动启用 WAF，无需每个站点单独写 `caddyguard` 指令（通过 `caddyguardfile` 适配器实现）
-- **12 项检测链**：白名单 IP/URL/UA、黑名单 IP、CC 攻击防护、URL 路径/参数检测（含 256+ 参数截断兜底）、User-Agent/Cookie/Referer 检测、POST body 检测（含大 body 超限拦截）、文件上传扩展名检测
+- **13 项检测链**：白名单 IP/URL/UA、黑名单 IP、CC 攻击防护、URL 路径/参数检测（含 256+ 参数截断兜底）、User-Agent/请求头/Cookie/Referer 检测、POST body 检测（含大 body 超限拦截 + 实体拆分兜底）、文件上传扩展名检测
 - **IPv4/IPv6 双栈**：IP 黑白名单同时支持 IPv4 和 IPv6，支持 CIDR 表示法（`192.168.1.0/24`、`2001:db8::/32`）、glob 通配符（`192.168.*.*`、`2001:db8::*`）和精确匹配
 - **高性能**：正则预编译（含 `(?i)` 大小写不敏感版本）+ POST body 关键词自动提取预过滤 + 64 分片 CC 存储 + Config 预合并缓存，WAF 全规则开启仅 ~1.7% 性能开销
 - **热加载**：规则和配置文件修改后 2 秒内自动生效，无需重启 Caddy
@@ -181,6 +181,7 @@ caddy run --config /etc/caddy/caddy.json
 ├── post.rule                # POST body 黑名单
 ├── cookie.rule              # Cookie 黑名单
 ├── useragent.rule           # 恶意 User-Agent 黑名单（扫描器/爬虫）
+├── header.rule              # 请求头黑名单（绕过类头/SSRF 元数据头/Log4Shell）
 ├── referer.rule             # 恶意 Referer 黑名单（支付接口保护）
 ├── whiteip.rule             # IP 白名单
 ├── whiteua.rule             # User-Agent 白名单（搜索引擎蜘蛛）
@@ -189,19 +190,19 @@ caddy run --config /etc/caddy/caddy.json
 ├── cdnip.rule              # CDN/可信代理 IP 列表（控制 XFF 信任，支持 CIDR）
 ├── fileext.rule             # 文件上传扩展名黑名单
 └── domains/                 # 域名级独立规则目录
-    └── www.example.com/     # 该域名专用规则（13 个 .rule 文件）
+    └── www.example.com/     # 该域名专用规则（12 个 .rule 文件，未提供的文件回退全局）
         ├── url.rule
         ├── args.rule
         ├── post.rule
         ├── cookie.rule
         ├── useragent.rule
+        ├── header.rule
         ├── whiteua.rule
         ├── referer.rule
         ├── fileext.rule
         ├── whiteip.rule
         ├── whiteurl.rule
-        ├── blackip.rule
-        └── cdnip.rule
+        └── blackip.rule
 ```
 
 ### config.json 参数说明
@@ -215,6 +216,7 @@ caddy run --config /etc/caddy/caddy.json
 | `url_args_check` | string | `"on"` | URL 参数检测开关 |
 | `post_check` | string | `"on"` | POST body 检测开关 |
 | `user_agent_check` | string | `"on"` | User-Agent 检测开关 |
+| `header_check` | string | `"on"` | 请求头检测开关（`header.rule`：绕过类头 / SSRF 元数据头 / Log4Shell） |
 | `cookie_check` | string | `"on"` | Cookie 检测开关 |
 | `cc_check` | string | `"on"` | CC 攻击防护开关 |
 | `cc_rate` | string | `"60/60"` | CC 速率限制，格式 `请求数/时间窗口秒` |
@@ -306,10 +308,16 @@ select.+(from|limit)
 sleep\((\s*)(\d*)(\s*)\)
 \<(iframe|script|body|img|layer|div|meta|style|base|object|input)
 
-# useragent.rule — 恶意 UA 黑名单
-(HTTrack|harvest|audit|dirbuster|pangolin|nmap|sqlmap|w3af|owasp|Nikto)
-(Acunetix|WebVulnScan|Paros|WebInspect|Burp|BurpSuite|WebScarab|Nuclei|httpx)
-(Python-urllib|Python-requests|Go-http-client|scrapy|bot|crawl|spider|fetcher)
+# useragent.rule — 攻击扫描器 / 渗透工具 UA（命中 403）
+# 短词必须加边界，避免误杀正常业务 UA（详见文件头维护说明）
+(HTTrack|harvest|pangolin|nmap|sqlmap|w3af|fimap|havij|PycURL|netsparker|httperf|ApacheBench|wrk/|hey/|k6/)
+(Acunetix|WebVulnScan|Paros|WebInspect|\bBurp\b|BurpSuite|AppScan|Arachni|Skipfish|Wapiti|WhatWeb|Wfuzz|DirBuster|GoBuster|ffuf|dirmap|feroxbuster|Naabu|Nuclei|subfinder|masscan|ZGrab|Shodan|Censys|wpscan|nikto|dirb|pwntools)
+((?:^|[^-\w])httpx/|httpx-cli\b)         # 不匹配 python-httpx/、httpx-client
+(?:^|[^-\w])amass(?:$|[^-\w])            # 不匹配 amass-client（'-' 是非单词字符，\b 无法排除）
+(OWASP ZAP|ZAP/)                         # 不匹配 OWASP-Dependency-Check
+(xray/|afrog|fscan|TscanPlus|Yakit|W13Scan|vulmap|PocSuite|BBOT|katana/|\bGoby\b)
+# 正常搜索引擎/归档爬虫（Amazonbot/Applebot-Extended/ia_archiver）与调试工具
+# （Postman/Charles/Fiddler）不在攻击规则内，不拦截；如需限制爬虫应使用独立 bot 规则 + 限速
 
 # fileext.rule — 文件上传扩展名黑名单
 \.php\..*\.(htaccess|bash_history)
@@ -341,6 +349,7 @@ YandexBot
 
 # 可用检测项：
 #   user_agent   - User-Agent 检测
+#   header       - 请求头检测（header.rule）
 #   referer      - Referer 检测
 #   url_attack   - URL 路径检测
 #   url_args     - URL 参数检测
@@ -442,9 +451,30 @@ YandexBot
 
 | 白名单 | 文件 | 行为 | 说明 |
 |--------|------|------|------|
-| **白名单 IP** | `whiteip.rule` | **全局放行**，跳过全部 12 项检测 | 信任 IP，完全不做任何安全检测 |
+| **白名单 IP** | `whiteip.rule` | **全局放行**，跳过全部 13 项检测 | 信任 IP，完全不做任何安全检测 |
 | **白名单 URL** | `whiteurl.rule` | **仅跳过指定检测项**（默认只跳过 URL 路径检测），其他检测照常 | 可配置跳过哪些检测项，避免全局放行的安全风险 |
-| **白名单 UA** | `whiteua.rule` | **仅跳过 UA 黑名单检测**，其他检测照常 | 搜索引擎蜘蛛免被 UA 黑名单误杀，但仍受 URL/参数/POST 等检测约束 |
+| **白名单 UA** | `whiteua.rule` | **仅跳过 UA 黑名单检测**，其他检测照常 | 搜索引擎蜘蛛免被 UA 黑名单误杀，但仍受 URL/参数/请求头/POST 等检测约束 |
+
+### 请求头检测（header.rule）
+
+`header.rule` 检测**请求头**中的攻击/绕过特征，覆盖 URL/参数/body 规则触达不到的场景（如 Next.js CVE-2025-29927 中间件绕过）。
+
+- **匹配对象**：所有请求头拼接成的 `Name: value` 多行文本（含 Host）
+- **匹配模式**：大小写不敏感 + 多行（`(?m)`），规则用 `^` 可锚定任意头名开头
+- **写规则建议**：务必用 `^` 锚定头名；否则会误伤头值中的普通文本
+
+```
+# header.rule（内置规则节选）
+(?i:^x-middleware-subrequest:)          # Next.js 中间件绕过 CVE-2025-29927
+(?i:^x-original-url:)
+(?i:^x-rewrite-url:)                    # 代理层 URL/路径改写绕过头
+(?i:^(?:x-forwarded-for|x-real-ip):.*(?:169\.254\.169\.254|metadata\.google\.))
+(?i:\$\{jndi:)                          # 请求头中的 Log4Shell / JNDI 注入
+```
+
+- 关闭开关：`config.json` 中 `"header_check": "off"`，支持域名级覆盖
+- 单路径放行：`whiteurl.rule` 扩展格式加 `header` 跳过项，如 `/callback/ header,url_attack`
+- 日志类型：`Header`（`attack_method` 字段）
 
 ## 检测链
 
@@ -457,13 +487,14 @@ YandexBot
 | 3 | 静态黑名单 IP | `blackip.rule` | 手动配置的 IP 黑名单 |
 | 4 | 白名单 URL | `whiteurl.rule` | 返回跳过的检测项集合，**不再全局放行**；纯路径默认只跳过 URL 路径检测，扩展格式可指定跳过哪些检测项 |
 | 5 | User-Agent | `useragent.rule` | 恶意扫描器/工具 UA（白名单 UA 仅跳过此项；白名单 URL 可指定跳过） |
-| 6 | Referer | `referer.rule` | 恶意来源、支付接口保护（白名单 URL 可指定跳过） |
-| 7 | CC 攻击 | 实时计数 | 64 分片滑动窗口计数（白名单 URL 可指定跳过） |
-| 8 | [非 bodyless] 文件上传 | `fileext.rule` | 需解析 multipart，最昂贵；Content-Type 大小写不敏感匹配（白名单 URL 可指定跳过） |
-| 9 | URL 路径 | `url.rule` | 路径遍历、敏感文件、管理后台等（纯路径白名单默认跳过此项） |
-| 10 | URL 参数 | `args.rule` | SQL 注入、XSS、SSTI、RCE 等（白名单 URL 可指定跳过） |
-| 11 | Cookie | `cookie.rule` | Cookie 注入（白名单 URL 可指定跳过） |
-| 12 | [非 bodyless] POST body | `post.rule` | 需读取 body；关键词自动提取预过滤跳过正常请求；multipart 默认跳过（由 `multipart_streaming_check` 控制）；空规则不读取 body（白名单 URL 可指定跳过） |
+| 6 | 请求头 | `header.rule` | 绕过类头、SSRF 元数据头、Log4Shell（白名单 URL 可指定跳过） |
+| 7 | Referer | `referer.rule` | 恶意来源、支付接口保护（白名单 URL 可指定跳过） |
+| 8 | CC 攻击 | 实时计数 | 64 分片滑动窗口计数（白名单 URL 可指定跳过） |
+| 9 | [非 bodyless] 文件上传 | `fileext.rule` | 需解析 multipart，最昂贵；Content-Type 大小写不敏感匹配（白名单 URL 可指定跳过） |
+| 10 | URL 路径 | `url.rule` | 路径遍历、敏感文件、管理后台等（纯路径白名单默认跳过此项） |
+| 11 | URL 参数 | `args.rule` | SQL 注入、XSS、SSTI、RCE 等（白名单 URL 可指定跳过） |
+| 12 | Cookie | `cookie.rule` | Cookie 注入（白名单 URL 可指定跳过） |
+| 13 | [非 bodyless] POST body | `post.rule` | 需读取 body；关键词自动提取预过滤跳过正常请求；form-urlencoded 遇 `&#` / `\u` / `\x` 标记时回扫 raw body 防实体拆分绕过；multipart 默认跳过（由 `multipart_streaming_check` 控制）；空规则不读取 body（白名单 URL 可指定跳过） |
 
 ## 热加载
 
@@ -513,7 +544,7 @@ CaddyGuard 支持规则和配置的热加载：
 | `local_time` | 本地时间 |
 | `server_name` | 域名 |
 | `user_agent` | 请求 UA |
-| `attack_method` | 命中的检测项（UserAgent / URL / URLArgs / Cookie / Referer / POST / FileUpload） |
+| `attack_method` | 命中的检测项（UserAgent / Header / URL / URLArgs / Cookie / Referer / POST / FileUpload / POSTOversize） |
 | `req_url` | 请求 URL |
 | `req_data` | POST body 数据（仅 POST 检测时） |
 | `rule_tag` | 命中的具体规则内容 |
@@ -525,34 +556,34 @@ CaddyGuard 支持规则和配置的热加载：
 - **测试机**：物理机（4 核 CPU），192.168.2.180
 - **发包机**：Apache Bench (ab)，本机回环
 - **参数**：50000 请求，200 并发，Keep-Alive
-- **日期**：2026-08-19（优化后）
+- **日期**：2026-09-17（同步 nginxguard 最新规则 + 新增请求头检测后复测；2026-08-19 数据见 git 记录）
 
 ### 压测对比
 
 | 场景 | req/s | P99 | 开销 | 说明 |
 |------|-------|-----|------|------|
-| Caddy + reverse_proxy（无 WAF） | 6,329 | 73ms | 基准 | 无 WAF 的 Caddy 反向代理 |
-| CaddyGuard 规则全关 | 6,405 | 70ms | ~0% | WAF 开启但所有规则关闭 |
-| CaddyGuard 规则全开（不含 CC） | 6,223 | 73ms | ~1.7% | 12 项检测全开 + 关键词预过滤 + 匹配缓存 |
-| CaddyGuard 攻击 UA 拦截 | 11,027 | 21ms | — | UA 命中直接 403，不走后端 |
-| CaddyGuard + POST body | 5,363 | 86ms | ~15% | POST body 读取 + Content-Type 分流 + 关键词预过滤 |
-| 路径级 WAF off（webhook） | 10,765 | 22ms | — | waf_enable off 路径直返 |
-| 路径级 WAF on（同配置） | 10,739 | 23ms | — | 同配置 WAF on 路径对比 |
+| Caddy + reverse_proxy（无 WAF） | 6,341 | 73ms | 基准 | 无 WAF 的 Caddy 反向代理 |
+| CaddyGuard 规则全关 | 6,340 | 70ms | ~0% | WAF 开启但所有规则关闭 |
+| CaddyGuard 规则全开（不含 CC） | 6,121 | 72ms | ~3.5% | 13 项检测全开 + 关键词预过滤 + 匹配缓存 |
+| CaddyGuard 攻击 UA 拦截 | 10,447 | 26ms | — | UA 命中直接 403，不走后端 |
+| CaddyGuard + POST body | 5,237 | 90ms | ~17.4% | POST body 读取 + Content-Type 分流 + 关键词预过滤 |
+| 路径级 WAF off（webhook） | 10,592 | 23ms | — | waf_enable off 路径直返 |
+| 路径级 WAF on（同配置） | 10,470 | 24ms | — | 同配置 WAF on 路径对比 |
 
-> WAF 全开吞吐下降仅 1.7%（6,223 vs 6,329）。相比优化前（11.4%），性能损耗大幅缩减。
+> 2026-09-17 复测（同步 nginxguard 最新规则 + 新增第 13 项请求头检测后，同一测试机 2.180）：WAF 全开吞吐下降 ~3.5%（6,121 vs 6,341），相比优化前（11.4%）仍大幅缩减；新增请求头检测与规则集扩充带来的额外开销约 1.8 个百分点。
 
 ### 单项检测性能对比
 
 | 检测项 | req/s | P99 | vs 基准 | 说明 |
 |--------|-------|-----|---------|------|
-| 无 WAF 基准 | 6,329 | 73ms | — | Caddy + reverse_proxy |
-| 仅 URL 检测 | 6,332 | 70ms | -0.04% | URL 路径 regex |
-| URL + 参数检测 | 6,400 | 67ms | +1.1% | URL + 参数 regex |
-| 仅 UA 检测 | 6,408 | 71ms | +1.2% | Bloom-filter 预检 + 空规则短路 |
-| 仅 Cookie 检测 | 6,450 | 69ms | +1.9% | Header 读取 + 空规则短路 |
-| 仅 IP 黑白名单 | 6,238 | 72ms | -1.4% | CIDR/glob/精确匹配 |
-| 仅 POST body | 5,536 | 78ms | -12.5% | body I/O + Content-Type 分流 + 关键词预过滤 |
-| 仅白名单 | 6,222 | 70ms | -1.7% | IP/URL/UA 白名单 |
+| 无 WAF 基准 | 6,341 | 73ms | — | Caddy + reverse_proxy |
+| 仅 URL 检测 | 6,308 | 69ms | -0.5% | URL 路径 regex |
+| URL + 参数检测 | 6,284 | 72ms | -0.9% | URL + 参数 regex |
+| 仅 UA 检测 | 6,202 | 72ms | -2.2% | 白名单短路 + 空规则短路 |
+| 仅 Cookie 检测 | 6,350 | 70ms | +0.2% | Header 读取 + 空规则短路 |
+| 仅 IP 黑白名单 | 6,129 | 73ms | -3.3% | CIDR/glob/精确匹配 |
+| 仅 POST body | 5,391 | 88ms | -15.0% | body I/O + Content-Type 分流 + 关键词预过滤 |
+| 仅白名单 | 6,129 | 73ms | -3.3% | IP/URL/UA 白名单 |
 
 > POST body 检测使用自动关键词预过滤：加载阶段从每条正则规则中自动提取字面量关键词，请求阶段先做 bytes.Contains 检查（SIMD 优化），不包含任何关键词的 body 直接跳过全部正则。form-urlencoded 请求通过 ParseQuery 解析 key/value 后跳过 raw body 二次扫描。剩余开销来自 Caddy 框架的 body I/O（读取 + 恢复 + reverse_proxy 二次读取），非 WAF 逻辑本身。
 
@@ -560,18 +591,18 @@ CaddyGuard 支持规则和配置的热加载：
 
 | 并发 | req/s | P99 | 说明 |
 |-------|-------|-----|------|
-| c=10 | 6,085 | 5ms | 低并发延迟极低 |
-| c=50 | 6,555 | 18ms | |
-| c=100 | 6,343 | 35ms | |
-| c=200 | 6,275 | 72ms | 标准压测并发 |
-| c=500 | 5,507 | 172ms | 高并发开始排队 |
+| c=10 | 6,006 | 5ms | 低并发延迟极低 |
+| c=50 | 6,355 | 19ms | |
+| c=100 | 6,293 | 37ms | |
+| c=200 | 6,049 | 72ms | 标准压测并发 |
+| c=500 | 5,691 | 193ms | 高并发开始排队 |
 
 ### CC 防护测试
 
 | 场景 | req/s | Fail | 说明 |
 |------|-------|------|------|
-| 100 请求 / c=10 | 6,229 | 0 | 不触发 CC，全部放行 |
-| 50000 请求 / c=200 | 10,702 | 49,951 | 150/60s 触发封禁，后续全部 403 |
+| 100 请求 / c=10 | 6,053 | 0 | 不触发 CC，全部放行 |
+| 50000 请求 / c=200 | 10,454 | 49,951 | 触发 cc_rate 阈值封禁，后续全部 403 |
 
 ### 性能优化措施
 
@@ -601,6 +632,8 @@ CaddyGuard 支持规则和配置的热加载：
 | 仅 UA 检测 | 5,881 | 6,408 | **+9.0%** |
 | WAF 全开 vs 无 WAF 开销 | ~11% | ~1.7% | **降低 85%** |
 
+> 2026-09-17 复测：WAF 全开 vs 无 WAF 开销为 ~3.5%（新增请求头检测 + 规则集扩充所致）；上表为 2026-08-19 优化时的对比数据。
+
 ### Go Benchmark 微基准
 
 | 组件 | 性能 | 说明 |
@@ -609,14 +642,14 @@ CaddyGuard 支持规则和配置的热加载：
 | CC IsBanned (并行) | 25 ns/op | 分片读锁 |
 | matchRules (大小写不敏感) | 2.2 ns/op | ToLower 只做一次 + worker 缓存 |
 | GetEffectiveConfig | 1,474 ns/op | 预合并缓存 O(1) |
-| runChecks (正常请求) | 6,431 ns/op | 12 项检测全通过 |
+| runChecks (正常请求) | 6,872 ns/op | 13 项检测全通过（2026-09-17 复测，i5-11400，新增请求头检测后 +441 ns/op） |
 
 ## 稳定性测试结果
 
 | 测试项 | 结果 | 说明 |
 |--------|------|------|
-| 持续压测 10 分钟 | ✅ | 内存零增长，进程存活 |
-| 100 万随机 URL CC 攻击 | ✅ | 内存仅增长 5MB，cleanup 后回收 |
+| 持续压测 10 分钟 | ✅ | 内存 +16MB 预热后持平不再增长（59.8MB → 76.6MB 稳定），进程存活 |
+| 100 万随机 URL CC 攻击 | ✅ | 内存仅增长 5.3MB，cleanup 后回收 |
 | 1MB POST body | ✅ | 正常处理 (HTTP 200) |
 | 10MB POST body | ✅ | 未崩溃 |
 | 32MB+ multipart 文件 | ✅ | 未崩溃 |
@@ -640,7 +673,13 @@ CaddyGuard 支持规则和配置的热加载：
 | bodyless 域名级覆盖 | ✅ | strict.example.com 覆盖为 off，强制扫描所有方法 |
 | 日志字段截断保护 | ✅ | 10000 字节攻击 URL 截断到 4110 字节 (4096+...[truncated]) |
 | cc_rate 无效配置 | ✅ | CC 检测自动禁用 + 错误日志记录，避免静默 fail-open |
-| 回归测试 156 项 | ✅ | 156/156 全部通过，0 失败 |
+| 请求头检测（header.rule） | ✅ | 绕过类头 / SSRF 元数据头 / Log4Shell 拦截 (403)，头值中的同名文本不误拦 (200) |
+| header.rule 热加载 | ✅ | 新增/修改规则 4s 内生效，无需重启 |
+| 回归测试 180 项 | ✅ | test_full.sh（2.180）180/180 全部通过，0 失败（含请求头检测 9 项、实体拆分兜底 1 项、UA 边界/误杀 12 项） |
+| 规则全量测试 | ✅ | test_rules.sh（2.180）45/45 通过 |
+| 稳定性套件 S1~S8 | ✅ | stability_test.sh（2.180）25 PASS / 0 FAIL：10 分钟压测内存稳定（+16MB 预热后持平）、100 万随机 URL 仅 +5MB 且过期回收、热加载/重启/ReDoS/畸形请求不崩溃、攻击拦截 16/16 |
+| JSON 配置模式 | ✅ | caddy_waf.json（方式 3）8/8 通过，含请求头检测与 subroute `waf_enable off` |
+| 全场景压测 v4 | ✅ | run_bench_v4.sh（2.180）17 个场景 Fail=0 |
 
 ### 攻击拦截测试详情
 
@@ -657,6 +696,11 @@ CaddyGuard 支持规则和配置的热加载：
 | sqlmap UA | 403 | ✅ 403 | UA 黑名单检测 |
 | nmap UA | 403 | ✅ 403 | UA 黑名单检测 |
 | dirb UA | 403 | ✅ 403 | UA 黑名单检测 |
+| Burp Suite Professional UA | 403 | ✅ 403 | `\bBurp\b` 边界匹配（原裸 `Burp` 会误杀 BurpMobile） |
+| httpx/1.3.0 / httpx-cli UA | 403 | ✅ 403 | `(?:^|[^-\w])httpx/` 前缀匹配 |
+| BurpMobile / httpx-client / python-httpx / amass-client UA | 200 | ✅ 200 | 短词边界不误杀 |
+| OWASP-Dependency-Check UA | 200 | ✅ 200 | `owasp` 改为 `OWASP ZAP\|ZAP/` |
+| Amazonbot / Applebot-Extended / ia_archiver UA | 200 | ✅ 200 | 正常爬虫已移出攻击规则 |
 | Cookie 注入 | 403 | ✅ 403 | Cookie 检测 |
 | POST SQL 注入 | 403 | ✅ 403 | POST body 检测 |
 | POST XSS | 403 | ✅ 403 | POST body 检测 |
@@ -673,6 +717,13 @@ CaddyGuard 支持规则和配置的热加载：
 | .htaccess 文件上传 | 403 | ✅ 403 | 文件扩展名检测 |
 | bodyless=on GET 跳过 body | 200 | ✅ 200 | GET 无 body 检测开销 |
 | bodyless=off 全方法扫描 | 403 | ✅ 403 | POST 攻击仍被拦截 |
+| 请求头 X-Original-URL 绕过 | 403 | ✅ 403 | header.rule 请求头检测 |
+| 请求头 X-Middleware-Subrequest | 403 | ✅ 403 | Next.js CVE-2025-29927 中间件绕过 |
+| 请求头 `X-Backend` / 方法覆盖头 | 403 | ✅ 403 | header.rule 权限绕过头检测 |
+| 请求头含 `${jndi:` 注入 | 403 | ✅ 403 | header.rule Log4Shell 检测 |
+| 请求头代理头含 169.254.169.254 | 403 | ✅ 403 | header.rule 云元数据 SSRF 检测 |
+| 正常头值含 `x-backend:` 文本 | 200 | ✅ 200 | `^` 锚定头名，不误伤头值 |
+| POST 实体拆分 XSS（`&#x3c;`） | 403 | ✅ 403 | form-urlencoded raw body 兜底扫描 |
 | 日志截断 10KB URL | 403 | ✅ 403 | req_url 截断到 4110 字节 |
 | cc_rate 无效配置 | 200 | ✅ 200 | CC 禁用 + 错误日志记录 |
 
@@ -754,6 +805,7 @@ caddyguard/
 ├── detector_ip.go         # IP 黑白名单检测（IPv4/IPv6 CIDR + glob + 精确匹配）
 ├── detector_url.go        # URL 路径 + URL 参数检测
 ├── detector_ua.go         # User-Agent 检测（黑名单 + 白名单）
+├── detector_header.go     # 请求头检测（header.rule：绕过类头/SSRF 元数据头/Log4Shell）
 ├── detector_cookie.go     # Cookie 注入检测
 ├── detector_post.go       # POST body 检测（Content-Type 分流 + 大 body 超限拦截 + multipart_streaming_check 开关 + 关键词预过滤）
 ├── detector_cc.go         # CC 攻击检测（64 分片滑动窗口）

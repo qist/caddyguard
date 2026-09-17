@@ -9,6 +9,7 @@
     "url_check": "on",
     "url_args_check": "on",
     "user_agent_check": "on",
+    "header_check": "on",
     "cookie_check": "on",
     "cc_check": "on",
     "cc_rate": "150/60",

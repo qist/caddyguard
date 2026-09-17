@@ -11,6 +11,7 @@
 #
 # 可用检测项:
 #   user_agent   - User-Agent 检测 (useragent.rule)
+#   header       - 请求头检测 (header.rule)
 #   referer      - Referer 检测 (referer.rule)
 #   url_attack   - URL路径检测 (url.rule)
 #   url_args     - URL参数检测 (args.rule)
