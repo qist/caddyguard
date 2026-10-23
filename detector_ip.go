@@ -75,6 +75,8 @@ func (g *Guard) blackIPCheck(w http.ResponseWriter, r *http.Request, cfg Config)
 
 // dynamicBlackIPCheck 动态黑名单（CC 自动拉黑）
 // 命中 → 拦截
+// 始终检查全局 IP 封禁；cc_mode="ip_host" 时同时检查域名级封禁
+// （ip_host 模式下 cc_attack_check 写入的 "h|host|ip" key，与 Lua 逻辑一致）
 func (g *Guard) dynamicBlackIPCheck(w http.ResponseWriter, r *http.Request, cfg Config) bool {
 	if cfg.CCBlockTTL <= 0 {
 		return false
@@ -84,6 +86,13 @@ func (g *Guard) dynamicBlackIPCheck(w http.ResponseWriter, r *http.Request, cfg 
 		g.logger.Record("DynamicBlackIP", reqURICached(r), "", "CC Ban", clientIP, r, cfg)
 		g.wafOutput(w, cfg)
 		return true
+	}
+	if cfg.CCMode == "ip_host" {
+		if g.ccStore.IsBanned(ccBanKey("ip_host", getDomain(r), clientIP)) {
+			g.logger.Record("DynamicBlackIP", reqURICached(r), "", "CC Ban (domain)", clientIP, r, cfg)
+			g.wafOutput(w, cfg)
+			return true
+		}
 	}
 	return false
 }

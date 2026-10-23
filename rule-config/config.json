@@ -13,6 +13,7 @@
     "cookie_check": "on",
     "cc_check": "on",
     "cc_rate": "150/60",
+    "cc_mode": "ip",
     "cc_block_ttl": 600,
     "post_check": "on",
     "referer_check": "off",

@@ -586,6 +586,9 @@ func mergeDomainConfig(base Config, domainCfg map[string]interface{}) Config {
 	if v, ok := domainCfg["cc_rate"].(string); ok && v != "" {
 		cfg.CCRate = v
 	}
+	if v, ok := domainCfg["cc_mode"].(string); ok && v != "" {
+		cfg.CCMode = v
+	}
 	if v, ok := domainCfg["cc_block_ttl"].(float64); ok && v > 0 {
 		cfg.CCBlockTTL = int(v)
 	}

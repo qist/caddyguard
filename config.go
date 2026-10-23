@@ -19,6 +19,7 @@ type Config struct {
 	CookieCheck     string `json:"cookie_check"`      // Cookie 检测开关
 	CCCheck         string `json:"cc_check"`          // CC 攻击检测开关
 	CCRate          string `json:"cc_rate"`           // CC 速率 "60/60"（次数/秒数）
+	CCMode          string `json:"cc_mode"`           // CC 计数粒度 "ip"（默认）/ "ip_uri" / "ip_host"
 	CCBlockTTL      int    `json:"cc_block_ttl"`      // CC 触发后封禁时长（秒）
 	PostCheck       string `json:"post_check"`        // POST 检测开关
 	RefererCheck    string `json:"referer_check"`     // Referer 检测开关
@@ -33,9 +34,9 @@ type Config struct {
 	WAFRedirectURL string `json:"waf_redirect_url"` // 重定向 URL
 
 	// Body 扫描控制（对应 Lua config_upload_filename_scan_limit / config_post_body_scan_limit）
-	MultipartStreamingCheck string `json:"multipart_streaming_check"` // multipart body 流式扫描开关 "on"/"off"
-	UploadFilenameScanLimit int64 `json:"upload_filename_scan_limit"` // multipart 文件名扫描上限（字节），0=全扫
-	PostBodyScanLimit       int64 `json:"post_body_scan_limit"`        // 非 multipart body 扫描上限（字节），超过直接拦截
+	MultipartStreamingCheck string `json:"multipart_streaming_check"`  // multipart body 流式扫描开关 "on"/"off"
+	UploadFilenameScanLimit int64  `json:"upload_filename_scan_limit"` // multipart 文件名扫描上限（字节），0=全扫
+	PostBodyScanLimit       int64  `json:"post_body_scan_limit"`       // 非 multipart body 扫描上限（字节），超过直接拦截
 }
 
 // DefaultConfig 返回默认配置
@@ -57,6 +58,7 @@ func DefaultConfig() Config {
 		CookieCheck:       "on",
 		CCCheck:           "on",
 		CCRate:            "60/60",
+		CCMode:            "ip", // 默认按整 IP 计数，跨 URI/域名共享额度
 		CCBlockTTL:        600,
 		PostCheck:         "on",
 		RefererCheck:      "off",
@@ -66,8 +68,8 @@ func DefaultConfig() Config {
 		WAFRedirectURL:    "https://www.waf.com",
 
 		// Body 扫描控制默认值（对应 Lua config.lua 默认值）
-		MultipartStreamingCheck: "off",    // 默认关闭：multipart 只做 filename 检查，跳过 raw body 流式扫描
-		UploadFilenameScanLimit: 0,        // 0 = 扫描整个上传临时文件
+		MultipartStreamingCheck: "off",   // 默认关闭：multipart 只做 filename 检查，跳过 raw body 流式扫描
+		UploadFilenameScanLimit: 0,       // 0 = 扫描整个上传临时文件
 		PostBodyScanLimit:       2097152, // 2MB：超过此值直接拦截
 	}
 }

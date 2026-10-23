@@ -13,6 +13,10 @@ import (
 
 // ccAttackCheck CC 攻击检测
 // 基于滑动窗口的速率限制，超阈值自动拉黑
+// 计数粒度由 cc_mode 决定（对应 nginxguard 的 config_cc_mode）：
+//   - "ip"（默认）：按整 IP 计数，跨 URI/域名共享额度
+//   - "ip_uri"：按 IP+URI 计数，仅防单路径刷
+//   - "ip_host"：按域名+IP 计数，各域名独立额度，自动拉黑也只作用于该域名
 func (g *Guard) ccAttackCheck(w http.ResponseWriter, r *http.Request, cfg Config) bool {
 	if cfg.CCCheck != "on" {
 		return false
@@ -25,20 +29,25 @@ func (g *Guard) ccAttackCheck(w http.ResponseWriter, r *http.Request, cfg Config
 	}
 
 	clientIP := g.getClientIPCached(r, cfg)
-	uri := r.URL.Path
-	ccKey := clientIP + uri
+	ccMode := cfg.CCMode
 
 	// 通过存储接口计数（内存或 Redis）
-	count := g.ccStore.Incr(ccKey, time.Duration(ccSeconds)*time.Second)
+	// ip_uri 模式取纯路径（对应 Lua var.uri，不含 query）
+	count := g.ccStore.Incr(ccCountKey(ccMode, getDomain(r), clientIP, r.URL.Path), time.Duration(ccSeconds)*time.Second)
 
 	if count > ccCount {
-		logData := fmt.Sprintf("count=%d threshold=%d window=%ds", count, ccCount, ccSeconds)
+		logData := fmt.Sprintf("count=%d threshold=%d window=%ds mode=%s", count, ccCount, ccSeconds, ccModeString(ccMode))
 		g.logger.Record("CCAttack", reqURICached(r), logData, "CC Rate Limit", clientIP, r, cfg)
 
-		// 自动拉黑
+		// 自动拉黑：封禁粒度跟随 cc_mode
+		// "ip"/"ip_uri" 封禁整个 IP（全局，所有域名）；"ip_host" 仅封禁 域名+IP，
+		// 一个域名触发 CC 不会影响该 IP 访问其他域名
 		if cfg.CCBlockTTL > 0 {
-			if !g.ccStore.IsBanned(clientIP) {
-				g.ccStore.Ban(clientIP, time.Duration(cfg.CCBlockTTL)*time.Second)
+			banKey := ccBanKey(ccMode, getDomain(r), clientIP)
+			if !g.ccStore.IsBanned(banKey) {
+				g.ccStore.Ban(banKey, time.Duration(cfg.CCBlockTTL)*time.Second)
+				g.logger.Record("CCAutoBan", reqURICached(r), "_",
+					fmt.Sprintf("ban_%ds", cfg.CCBlockTTL), clientIP, r, cfg)
 			}
 		}
 
@@ -47,6 +56,40 @@ func (g *Guard) ccAttackCheck(w http.ResponseWriter, r *http.Request, cfg Config
 	}
 
 	return false
+}
+
+// ccModeString 归一化 cc_mode，未知/空值按默认 "ip" 处理（与 Lua 默认分支一致）
+func ccModeString(ccMode string) string {
+	switch ccMode {
+	case "ip_uri", "ip_host":
+		return ccMode
+	default:
+		return "ip"
+	}
+}
+
+// ccCountKey 构造 CC 计数 key（对应 Lua 的 CC_TOKEN）
+func ccCountKey(ccMode, host, clientIP, uri string) string {
+	switch ccMode {
+	case "ip_uri":
+		// per IP+URI: 只拦截单路径刷量
+		return "cc:" + clientIP + "|" + uri
+	case "ip_host":
+		// per 域名+IP: 各域名独立额度
+		return "cc:h|" + host + "|" + clientIP
+	default:
+		// 默认: per IP，跨 URI/域名共享额度
+		return "cc:" + clientIP
+	}
+}
+
+// ccBanKey 构造 CC 自动拉黑 key（封禁粒度跟随 cc_mode）
+// "ip"/"ip_uri" → 整 IP 全局封禁；"ip_host" → 仅封禁 域名+IP
+func ccBanKey(ccMode, host, clientIP string) string {
+	if ccMode == "ip_host" {
+		return "h|" + host + "|" + clientIP
+	}
+	return clientIP
 }
 
 // parseCCRate 解析 "60/60" → (60, 60)

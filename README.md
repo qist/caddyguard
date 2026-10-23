@@ -220,7 +220,8 @@ caddy run --config /etc/caddy/caddy.json
 | `cookie_check` | string | `"on"` | Cookie 检测开关 |
 | `cc_check` | string | `"on"` | CC 攻击防护开关 |
 | `cc_rate` | string | `"60/60"` | CC 速率限制，格式 `请求数/时间窗口秒` |
-| `cc_block_ttl` | int | `600` | CC 触发后封禁时长（秒） |
+| `cc_mode` | string | `"ip"` | CC 计数粒度：`ip`（默认，整 IP 跨 URI/域名共享额度）/ `ip_uri`（按 IP+URI，仅防单路径刷）/ `ip_host`（按域名+IP，各域名独立额度，自动拉黑也只作用于该域名），详见下方「CC 封禁隔离设计说明」 |
+| `cc_block_ttl` | int | `600` | CC 触发后封禁时长（秒）。设为 `0` 时该域名不自动拉黑，也**不检查任何 CC 封禁**（逃生门，见下方设计说明） |
 | `white_ip_check` | string | `"on"` | IP 白名单检测开关 |
 | `white_ua_check` | string | `"on"` | UA 白名单检测开关 |
 | `white_url_check` | string | `"on"` | URL 白名单检测开关。命中后**不再全局放行**，仅跳过指定检测项（默认跳过 URL 路径检测） |
@@ -243,6 +244,7 @@ caddy run --config /etc/caddy/caddy.json
     "www.example.com": {
         "url_check": "off",
         "cc_rate": "100/60",
+        "cc_mode": "ip_host",
         "rule_dir": "domains/www.example.com"
     },
     "api.example.com": {
@@ -507,11 +509,31 @@ CaddyGuard 支持规则和配置的热加载：
 
 ## CC 防护机制
 
-- **64 分片**：基于 FNV-1a hash 对 `IP+URI` 分片，消除全局锁竞争
+- **64 分片**：基于 FNV-1a hash 对计数 key 分片，消除全局锁竞争
 - **8 桶滑动窗口**：真正的滑动窗口语义（非 TTL 重置）
 - **内存上限**：CC 计数器最大 100 万 key，超过后过期淘汰
-- **自动封禁**：超过 `cc_rate` 阈值后自动拉黑 IP，持续 `cc_block_ttl` 秒
+- **计数粒度可调**：`cc_mode` 决定计数 key 与拉黑 key 的粒度（见下方设计说明）
+- **自动封禁**：超过 `cc_rate` 阈值后按 `cc_mode` 粒度自动拉黑，持续 `cc_block_ttl` 秒
 - **自动清理**：后台每 60 秒清理过期计数器和过期封禁
+
+### CC 封禁隔离设计说明（cc_mode）
+
+CC 计数 key 与自动拉黑 key 的粒度跟随 `cc_mode`（与 nginxguard Lua 版对齐）：
+
+| 模式 | 计数 key | 拉黑 key |
+|------|---------|---------|
+| `ip`（默认） | `cc:<IP>` | `<IP>`（全局，全站生效） |
+| `ip_uri` | `cc:<IP>\|<URI>` | `<IP>`（全局） |
+| `ip_host` | `cc:h\|<域名>\|<IP>` | `h\|<域名>\|<IP>`（仅该域名） |
+
+`cc_mode` 支持在 `domain.json` 中按域名覆盖，封禁范围跟随**该域名生效的 cc_mode**，与配置层级无关。
+
+**隔离是单向的，这是有意的设计决策**：
+
+- `ip_host` 域名自身触发 CC → 只拉黑 `域名+IP`，不影响其他域名
+- 其他域名（`ip`/`ip_uri` 模式）触发 CC → 写入全局 IP 封禁 → **`ip_host` 域名同样会被 403**（全局封禁对所有域名无条件生效）
+
+理由：全局封意味着该 IP 已在别的域名上触发过 CC（明确攻击特征），此时放行其访问 `ip_host` 域名没有收益，安全优先作为全局兜底；而误伤代价很小（`cc_block_ttl` 到期自动解封）。如果确有域名需要完全无视全局封禁，可给该域名单独配置 `"cc_block_ttl": 0`——语义为「此域名只限速 403，不进封禁体系」的逃生门。若未来需要「无视全局封、但保留自身域名级拉黑」的语义，应新增独立显式配置项（如 `ignore_global_ban`），而不是隐式绑定 `cc_mode`。
 
 ## 日志
 
@@ -677,6 +699,7 @@ CaddyGuard 支持规则和配置的热加载：
 | header.rule 热加载 | ✅ | 新增/修改规则 4s 内生效，无需重启 |
 | 回归测试 180 项 | ✅ | test_full.sh（2.180）180/180 全部通过，0 失败（含请求头检测 9 项、实体拆分兜底 1 项、UA 边界/误杀 12 项） |
 | 规则全量测试 | ✅ | test_rules.sh（2.180）45/45 通过 |
+| cc_mode 计数粒度回归 | ✅ | test_cc_mode.sh（2.180）11/11 通过：ip 跨 URI 共享 / ip_uri 单 URI 独立 / ip_host 域名独立 + 封禁隔离 / 全局封禁跨域名兜底 / domain.json 域名级 cc_mode 覆盖 |
 | 稳定性套件 S1~S8 | ✅ | stability_test.sh（2.180）25 PASS / 0 FAIL：10 分钟压测内存稳定（+16MB 预热后持平）、100 万随机 URL 仅 +5MB 且过期回收、热加载/重启/ReDoS/畸形请求不崩溃、攻击拦截 16/16 |
 | JSON 配置模式 | ✅ | caddy_waf.json（方式 3）8/8 通过，含请求头检测与 subroute `waf_enable off` |
 | 全场景压测 v4 | ✅ | run_bench_v4.sh（2.180）17 个场景 Fail=0 |
@@ -782,6 +805,9 @@ go test -bench=. -benchmem -count=1
 
 # 稳定性测试
 bash test-config/stability_test.sh
+
+# cc_mode 计数粒度回归测试（在 180 上本地执行, 可用 CADDY=... 指定测试二进制）
+CADDY=/tmp/caddy-ccmode bash test-config/test_cc_mode.sh
 
 # 压测+监控
 bash test-config/bench_monitor.sh
