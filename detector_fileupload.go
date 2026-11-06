@@ -74,8 +74,10 @@ func (g *Guard) fileUploadCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 		filename := part.FileName()
 
 		// 1. 对 filename 进行 fileext.rule 匹配
+		// 大小写不敏感（对齐 Lua fileext 的 joi 标志）：纯字符串规则经
+		// strings.Contains 精确比对，若大小写敏感会被 .PHP/.Php 变体绕过
 		if filename != "" && len(fileRules) > 0 {
-			if matched := matchRules(filename, fileRules, false); matched != nil {
+			if matched := matchRules(filename, fileRules, true); matched != nil {
 				part.Close()
 				g.logger.Record("FileUpload", reqURICached(r), filename, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 				g.wafOutput(w, cfg)

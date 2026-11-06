@@ -271,6 +271,26 @@ caddy run --config /etc/caddy/caddy.json
 - **通配符域名**：`*.example.com` → 加载时预解析为列表，按后缀匹配
 - **域名级规则目录**：`rule_dir` 指定域名专用规则目录，该域名请求使用独立规则文件覆盖全局规则
 
+### 多域名共享配置
+
+多个域名（如同一站点的多个域名别名）需要相同配置时，支持 nginx `server_name` 风格的逗号分隔 key：
+
+```json
+{
+    "www.a.com, www.b.com, www.c.com": {
+        "cc_mode": "ip_host",
+        "cc_rate": "150/60",
+        "rule_dir": "domains/my-site"
+    }
+}
+```
+
+加载时自动展开为独立的域名条目，全部指向同一份配置对象（`rule_dir` 也随之共享，规则文件只需维护一份）。说明：
+
+- 逗号后的空格可选，域名会自动 trim 并转小写
+- 若展开后的域名与某个显式单域名 key 重复，**显式单域名 key 优先**
+- 显式单域名 key 同样自动转小写（`www.A.com` 与 `www.a.com` 等价）
+
 ### path 级别 WAF 开关
 
 推荐使用 Caddy 原生 `path` matcher 明确路径，再在对应的 `route` 中写

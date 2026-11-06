@@ -52,6 +52,26 @@ type domainWildcardEntry struct {
 	config Config
 }
 
+// compositeDomainEntry 逗号分隔多域名 key 的待展开条目
+// 如 "www.a.com, www.b.com" → 展开为两个独立域名条目共享同一配置
+type compositeDomainEntry struct {
+	key    string // 原始逗号分隔 key
+	config Config // 已合并全局基线的配置
+}
+
+// applyDomainEntry 将单个域名条目写入精确匹配 map 或通配符列表
+// 通配符 key 以 "*." 开头（如 *.example.com），suffix 取 key[1:]
+func applyDomainEntry(configs map[string]Config, wildcards *[]domainWildcardEntry, key string, cfg Config) {
+	if strings.HasPrefix(key, "*.") {
+		*wildcards = append(*wildcards, domainWildcardEntry{
+			suffix: key[1:],
+			config: cfg,
+		})
+	} else {
+		configs[key] = cfg
+	}
+}
+
 // globalConfigEntry config.json 缓存条目
 type globalConfigEntry struct {
 	modTime       int64
@@ -500,6 +520,9 @@ func (rc *RuleCache) GetDomainConfig() *domainConfigEntry {
 
 	configs := make(map[string]Config)
 	var wildcards []domainWildcardEntry
+	// 逗号分隔多域名 key（nginx server_name 风格）延后展开：
+	// "a.com, b.com" → 独立条目共享同一配置；显式单域名 key 优先
+	var composite []compositeDomainEntry
 
 	for key, rawVal := range rawConfigs {
 		var m map[string]interface{}
@@ -507,13 +530,25 @@ func (rc *RuleCache) GetDomainConfig() *domainConfigEntry {
 			continue // 跳过 _comment 等非对象字段
 		}
 		merged := mergeDomainConfig(globalCfg, m)
-		if strings.HasPrefix(key, "*.") {
-			wildcards = append(wildcards, domainWildcardEntry{
-				suffix: key[1:],
-				config: merged,
-			})
-		} else {
-			configs[key] = merged
+		if strings.Contains(key, ",") {
+			composite = append(composite, compositeDomainEntry{key: key, config: merged})
+			continue
+		}
+		// 显式 key 同样转小写（getDomain 返回值必为小写，混合大小写 key 无法匹配）
+		applyDomainEntry(configs, &wildcards, strings.ToLower(key), merged)
+	}
+
+	// 展开 composite key：子域名 trim+转小写，不覆盖显式单域名 key
+	for _, c := range composite {
+		for sub := range strings.SplitSeq(c.key, ",") {
+			domain := strings.ToLower(strings.TrimSpace(sub))
+			if domain == "" {
+				continue
+			}
+			if _, exists := configs[domain]; exists {
+				continue
+			}
+			applyDomainEntry(configs, &wildcards, domain, c.config)
 		}
 	}
 

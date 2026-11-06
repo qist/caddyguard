@@ -1,8 +1,10 @@
 package caddyguard
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -295,5 +297,88 @@ func TestHeaderRuleCommentLinesSkipped(t *testing.T) {
 		"X-Probe":    "1",
 	}, ""); code != http.StatusForbidden {
 		t.Fatalf("expected 403 for x-probe header, got %d", code)
+	}
+}
+
+// TestDomainMultiKeyExpansion 验证 domain.json 逗号分隔多域名 key 展开
+// （对应 nginxguard 0d3c6fe）：展开条目共享同一配置、显式单域名 key 优先、子域名 trim+转小写
+func TestDomainMultiKeyExpansion(t *testing.T) {
+	headerRule := "(?i:^x-original-url:)\n"
+	attack := map[string]string{"User-Agent": "Mozilla/5.0", "X-Original-URL": "/admin"}
+
+	// 逗号 key 展开后两个域名共享同一份配置
+	g := newTempGuard(t, nil, map[string]string{
+		"header.rule": headerRule,
+		"domain.json": `{"example.com, other.com": {"header_check": "off"}}`,
+	})
+	if code := doWAFRequest(t, g, "GET", "/", "example.com", attack, ""); code != http.StatusOK {
+		t.Fatalf("expected 200 for expanded domain example.com, got %d", code)
+	}
+	if code := doWAFRequest(t, g, "GET", "/", "other.com", attack, ""); code != http.StatusOK {
+		t.Fatalf("expected 200 for expanded domain other.com, got %d", code)
+	}
+	if code := doWAFRequest(t, g, "GET", "/", "third.com", attack, ""); code != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-configured domain, got %d", code)
+	}
+
+	// 显式单域名 key 优先于逗号 key 展开（third.com 显式 on，不被展开的 off 覆盖）
+	g = newTempGuard(t, nil, map[string]string{
+		"header.rule": headerRule,
+		"domain.json": `{"third.com, other.com": {"header_check": "off"}, "third.com": {"header_check": "on"}}`,
+	})
+	if code := doWAFRequest(t, g, "GET", "/", "third.com", attack, ""); code != http.StatusForbidden {
+		t.Fatalf("expected 403 for explicit single-domain key (must win over expansion), got %d", code)
+	}
+	if code := doWAFRequest(t, g, "GET", "/", "other.com", attack, ""); code != http.StatusOK {
+		t.Fatalf("expected 200 for expanded domain other.com, got %d", code)
+	}
+
+	// 子域名 trim + 转小写
+	g = newTempGuard(t, nil, map[string]string{
+		"header.rule": headerRule,
+		"domain.json": `{" Example.COM , OTHER.com ": {"header_check": "off"}}`,
+	})
+	if code := doWAFRequest(t, g, "GET", "/", "example.com", attack, ""); code != http.StatusOK {
+		t.Fatalf("expected 200 for trimmed+lowercased expansion (example.com), got %d", code)
+	}
+	if code := doWAFRequest(t, g, "GET", "/", "other.com", attack, ""); code != http.StatusOK {
+		t.Fatalf("expected 200 for trimmed+lowercased expansion (other.com), got %d", code)
+	}
+}
+
+// TestFileUploadCaseInsensitive 验证 fileext.rule 文件名匹配大小写不敏感
+// （对应 nginxguard d9e4bf3 修复思路：纯字符串与正则路径都不可被大写变体绕过）
+func TestFileUploadCaseInsensitive(t *testing.T) {
+	g := newTempGuard(t, nil, map[string]string{
+		"fileext.rule": "\\.php$\nbackdoor\n",
+	})
+
+	buildUpload := func(t *testing.T, filename string) (map[string]string, string) {
+		t.Helper()
+		var buf bytes.Buffer
+		w := multipart.NewWriter(&buf)
+		fw, err := w.CreateFormFile("file", filename)
+		if err != nil {
+			t.Fatalf("create form file: %v", err)
+		}
+		fw.Write([]byte("MZ"))
+		w.Close()
+		return map[string]string{"Content-Type": w.FormDataContentType()}, buf.String()
+	}
+
+	// 大写扩展名 .PHP 必须被 \.php$ 命中（大小写敏感时被绕过）
+	headers, body := buildUpload(t, "shell.PHP")
+	if code := doWAFRequest(t, g, "POST", "/", "example.com", headers, body); code != http.StatusForbidden {
+		t.Fatalf("expected 403 for shell.PHP upload, got %d", code)
+	}
+	// 大小写混合的纯字符串规则命中
+	headers, body = buildUpload(t, "evil.Backdoor")
+	if code := doWAFRequest(t, g, "POST", "/", "example.com", headers, body); code != http.StatusForbidden {
+		t.Fatalf("expected 403 for evil.Backdoor upload, got %d", code)
+	}
+	// 正常文件不受影响
+	headers, body = buildUpload(t, "report.pdf")
+	if code := doWAFRequest(t, g, "POST", "/", "example.com", headers, body); code != http.StatusOK {
+		t.Fatalf("expected 200 for report.pdf upload, got %d", code)
 	}
 }
