@@ -198,6 +198,13 @@ func (g *Guard) cleanupLoop() {
 func (g *Guard) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	defer func() {
 		if rv := recover(); rv != nil {
+			if rv == http.ErrAbortHandler {
+				// reverse_proxy 流式接口（SSE/长连接）在客户端断开或流结束时
+				// 主动 panic http.ErrAbortHandler 中止 handler——这是 net/http
+				// 的标准中止信号，不是真实错误。按标准语义 re-panic 交回上层
+				// （caddy/net/http server 会静默消化），不记 error 不写响应
+				panic(rv)
+			}
 			caddy.Log().Error("caddyguard panic",
 				zap.Any("error", rv),
 				zap.String("path", r.URL.Path))
