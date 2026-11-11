@@ -30,7 +30,7 @@ type RuleCache struct {
 
 // ruleFileEntry 存储预编译后的规则
 type ruleFileEntry struct {
-	modTime   int64       // Unix mtime (秒)
+	ver       fileVersion // 版本签名: mtime 纳秒 + 文件大小 (同秒连续修改可区分)
 	rules     []RuleEntry // 预编译后的规则列表
 	exists    bool        // 文件是否存在
 	multiline bool        // 是否按多行模式 (?m) 编译（header.rule）
@@ -40,7 +40,7 @@ type ruleFileEntry struct {
 
 // domainConfigEntry domain.json 缓存条目
 type domainConfigEntry struct {
-	modTime       int64
+	ver           fileVersion
 	configs       map[string]Config     // 精确域名 → 预合并后的 Config
 	wildcards     []domainWildcardEntry // 通配符域名列表（加载时预解析）
 	lastCheckNano int64                 // atomic
@@ -74,7 +74,7 @@ func applyDomainEntry(configs map[string]Config, wildcards *[]domainWildcardEntr
 
 // globalConfigEntry config.json 缓存条目
 type globalConfigEntry struct {
-	modTime       int64
+	ver           fileVersion
 	config        Config
 	lastCheckNano int64 // atomic
 }
@@ -88,13 +88,21 @@ func NewRuleCache(ruleDir string) *RuleCache {
 	}
 }
 
-// getFileMtime 获取文件修改时间（对应 Lua FFI stat）
-func getFileMtime(filepath string) (int64, bool) {
+// fileVersion 文件版本签名: mtime 纳秒 + 文件大小
+// 秒级 mtime 在同一秒内的连续修改无法区分 (同秒改文件 → 秒数不变 → 热加载漏检),
+// 纳秒 + 大小组合保证检测精度, 对应 Lua 版 get_file_mtime 返回的 "sec:nsec:size" 签名
+type fileVersion struct {
+	modNano int64
+	size    int64
+}
+
+// getFileVersion 获取文件版本签名
+func getFileVersion(filepath string) (fileVersion, bool) {
 	info, err := os.Stat(filepath)
 	if err != nil {
-		return 0, false
+		return fileVersion{}, false
 	}
-	return info.ModTime().Unix(), true
+	return fileVersion{info.ModTime().UnixNano(), info.Size()}, true
 }
 
 // shouldCheck 判断是否需要重新检查 mtime（节流）
@@ -146,13 +154,13 @@ func (rc *RuleCache) loadCached(filepath string, multiline bool) ([]RuleEntry, b
 	}
 
 	// 需要检查 mtime
-	mtime, exists := getFileMtime(filepath)
+	ver, exists := getFileVersion(filepath)
 	if !exists {
 		return nil, false
 	}
 
 	// 缓存命中（mtime 未变且编译模式一致）
-	if ok && entry.modTime == mtime && entry.multiline == multiline {
+	if ok && entry.ver == ver && entry.multiline == multiline {
 		// 更新最后检查时间
 		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
 		return entry.rules, true
@@ -163,7 +171,7 @@ func (rc *RuleCache) loadCached(filepath string, multiline bool) ([]RuleEntry, b
 	defer rc.mu.Unlock()
 
 	// double check
-	if entry, ok := rc.files[filepath]; ok && entry.modTime == mtime && entry.multiline == multiline {
+	if entry, ok := rc.files[filepath]; ok && entry.ver == ver && entry.multiline == multiline {
 		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
 		return entry.rules, true
 	}
@@ -177,7 +185,7 @@ func (rc *RuleCache) loadCached(filepath string, multiline bool) ([]RuleEntry, b
 	rules := parseAndCompileRules(string(content), multiline)
 	nowNano := time.Now().UnixNano()
 	rc.files[filepath] = &ruleFileEntry{
-		modTime:       mtime,
+		ver:           ver,
 		rules:         rules,
 		exists:        true,
 		multiline:     multiline,
@@ -439,12 +447,12 @@ func (rc *RuleCache) GetGlobalConfig() Config {
 	}
 
 	// 需要检查 mtime
-	mtime, exists := getFileMtime(path)
+	ver, exists := getFileVersion(path)
 	if !exists {
 		return DefaultConfig() // 文件不存在，用默认值
 	}
 
-	if entry != nil && entry.modTime == mtime {
+	if entry != nil && entry.ver == ver {
 		// mtime 未变，更新检查时间
 		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
 		return entry.config // 缓存命中
@@ -455,7 +463,7 @@ func (rc *RuleCache) GetGlobalConfig() Config {
 	defer rc.mu.Unlock()
 
 	// double check
-	if entry := rc.globalConfig; entry != nil && entry.modTime == mtime {
+	if entry := rc.globalConfig; entry != nil && entry.ver == ver {
 		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
 		return entry.config
 	}
@@ -471,7 +479,7 @@ func (rc *RuleCache) GetGlobalConfig() Config {
 	}
 
 	rc.globalConfig = &globalConfigEntry{
-		modTime:       mtime,
+		ver:           ver,
 		config:        cfg,
 		lastCheckNano: time.Now().UnixNano(),
 	}
@@ -493,12 +501,12 @@ func (rc *RuleCache) GetDomainConfig() *domainConfigEntry {
 	}
 
 	// 需要检查 mtime
-	mtime, exists := getFileMtime(path)
+	ver, exists := getFileVersion(path)
 	if !exists {
 		return nil
 	}
 
-	if entry != nil && entry.modTime == mtime {
+	if entry != nil && entry.ver == ver {
 		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
 		return entry
 	}
@@ -557,13 +565,13 @@ func (rc *RuleCache) GetDomainConfig() *domainConfigEntry {
 	defer rc.mu.Unlock()
 
 	// double check：可能在等待锁期间已被其他 goroutine 加载
-	if entry := rc.domainJSON; entry != nil && entry.modTime == mtime {
+	if entry := rc.domainJSON; entry != nil && entry.ver == ver {
 		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
 		return entry
 	}
 
 	newEntry := &domainConfigEntry{
-		modTime:       mtime,
+		ver:           ver,
 		configs:       configs,
 		wildcards:     wildcards,
 		lastCheckNano: time.Now().UnixNano(),
@@ -678,7 +686,7 @@ type WhiteURLRule struct {
 
 // whiteURLRuleEntry whiteurl.rule 的缓存条目
 type whiteURLRuleEntry struct {
-	modTime       int64
+	ver           fileVersion
 	parsed        *WhiteURLRule
 	lastCheckNano int64 // atomic
 }
@@ -820,13 +828,13 @@ func (rc *RuleCache) loadWhiteURLCached(filepath string) (*WhiteURLRule, bool) {
 	}
 
 	// 需要检查 mtime
-	mtime, exists := getFileMtime(filepath)
+	ver, exists := getFileVersion(filepath)
 	if !exists {
 		return nil, false
 	}
 
 	// 缓存命中
-	if ok && entry.modTime == mtime {
+	if ok && entry.ver == ver {
 		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
 		return entry.parsed, true
 	}
@@ -836,7 +844,7 @@ func (rc *RuleCache) loadWhiteURLCached(filepath string) (*WhiteURLRule, bool) {
 	defer rc.mu.Unlock()
 
 	// double check
-	if entry, ok := rc.whiteURLFiles[filepath]; ok && entry.modTime == mtime {
+	if entry, ok := rc.whiteURLFiles[filepath]; ok && entry.ver == ver {
 		atomic.StoreInt64(&entry.lastCheckNano, time.Now().UnixNano())
 		return entry.parsed, true
 	}
@@ -849,7 +857,7 @@ func (rc *RuleCache) loadWhiteURLCached(filepath string) (*WhiteURLRule, bool) {
 	parsed := parseWhiteURLRule(string(content))
 	nowNano := time.Now().UnixNano()
 	rc.whiteURLFiles[filepath] = &whiteURLRuleEntry{
-		modTime:       mtime,
+		ver:           ver,
 		parsed:        parsed,
 		lastCheckNano: nowNano,
 	}

@@ -27,10 +27,10 @@ type ipRuleSet struct {
 // 对应 nginxguard 的 worker_ip_cache
 var ipCacheWorker sync.Map // key: filepath → value: *ipRuleSetEntry
 
-// ipRuleSetEntry 带_mtime 的缓存条目，用于 mtime 变更检测
+// ipRuleSetEntry 带版本签名的缓存条目，用于规则变更检测
 type ipRuleSetEntry struct {
 	ruleSet *ipRuleSet
-	mtime   int64
+	ver     fileVersion
 }
 
 // compileIPRules 将 []RuleEntry 预编译为 *ipRuleSet
@@ -172,21 +172,21 @@ func (g *Guard) getCompiledIPRules(filename string, domainRuleDir string) *ipRul
 	if domainRuleDir != "" {
 		domainPath := resolveRuleDir(domainRuleDir, g.ruleCache.ruleDir) + "/" + filename
 		// 检查域名目录是否有该文件
-		if _, exists := getFileMtime(domainPath); exists {
+		if _, exists := getFileVersion(domainPath); exists {
 			filepath = domainPath
 		}
 	}
 
-	// 获取 mtime
-	mtime, exists := getFileMtime(filepath)
+	// 获取文件版本签名
+	ver, exists := getFileVersion(filepath)
 	if !exists {
 		return nil
 	}
 
-	// 检查 worker 缓存（mtime 变化时重新编译）
+	// 检查 worker 缓存（版本签名变化时重新编译）
 	if v, ok := ipCacheWorker.Load(filepath); ok {
 		entry := v.(*ipRuleSetEntry)
-		if entry.mtime == mtime {
+		if entry.ver == ver {
 			return entry.ruleSet
 		}
 	}
@@ -203,7 +203,7 @@ func (g *Guard) getCompiledIPRules(filename string, domainRuleDir string) *ipRul
 		rs := &ipRuleSet{exactSet: make(map[string]bool)}
 		ipCacheWorker.Store(filepath, &ipRuleSetEntry{
 			ruleSet: rs,
-			mtime:   mtime,
+			ver:     ver,
 		})
 		return rs
 	}
@@ -211,7 +211,7 @@ func (g *Guard) getCompiledIPRules(filename string, domainRuleDir string) *ipRul
 	rs := compileIPRules(rules)
 	ipCacheWorker.Store(filepath, &ipRuleSetEntry{
 		ruleSet: rs,
-		mtime:   mtime,
+		ver:     ver,
 	})
 
 	return rs
