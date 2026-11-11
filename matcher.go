@@ -213,6 +213,8 @@ func (z *matchZone) lookup(key string) (*RuleEntry, bool) {
 }
 
 // insert 写入新结果; 容量满时按 evictN 批量 FIFO 淘汰最旧条目 (只淘汰, 不清空)
+// store 写入必须在 mu 内完成: 与淘汰的 store.Delete 原子化, 否则并发下
+// 「登记槽位 → 未 Store → 被并发淘汰 Delete → 再 Store」会让条目永久滞留 store (泄漏)
 func (z *matchZone) insert(key string, value *RuleEntry) {
 	z.mu.Lock()
 	if z.seq-z.head >= int64(z.cap) {
@@ -239,16 +241,17 @@ func (z *matchZone) insert(key string, value *RuleEntry) {
 	z.q[slot] = key
 	z.owner[key] = z.seq
 	z.seq++
-	z.mu.Unlock()
 	z.store.Store(key, value)
+	z.mu.Unlock()
 }
 
-// promote 从本区移除条目 (晋升到热点区前调用); 队列残留槽位由淘汰时懒删除
+// promote 从本区移除条目 (晋升到热点区前调用); 队列残留槽位由淘汰时懒删除。
+// store.Delete 与 owner 删除同锁原子化, 避免与并发 insert/evict 交错产生滞留条目
 func (z *matchZone) promote(key string) {
 	z.mu.Lock()
 	delete(z.owner, key)
-	z.mu.Unlock()
 	z.store.Delete(key)
+	z.mu.Unlock()
 }
 
 // matchCacheStats 缓存占用诊断 (对应 Lua 版 get_match_cache_stats)
