@@ -2,11 +2,10 @@ package caddyguard
 
 import (
 	"bytes"
-	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 )
 
 // RuleEntry 规则条目：加载阶段预编译正则，请求阶段零编译开销
@@ -31,11 +30,13 @@ type RuleEntry struct {
 // caseInsensitive=true 时使用 RegexCI（(?i) 前缀预编译），
 // 无需运行时 ToLower，真正的大小写不敏感匹配
 //
-// worker 级匹配缓存（对应 Lua 的 worker_match_cache）：
-//   - 对小体积输入（≤512字节）的匹配结果做全局缓存
-//   - key = 规则指针 + caseInsensitive + input
-//   - 命中缓存时直接返回，跳过全部正则/子串匹配
-//   - 缓存上限 4096 条，满时清空重建（简单 LRU 策略）
+// worker 级分段匹配缓存（与 NginxGuard Lua 版同一结构与淘汰策略）：
+//   - 对小体积输入（≤512字节）的匹配结果做缓存，只优化检测速度、绝不改变检测结果
+//   - key = 规则集内容 FNV-1a 签名 + caseInsensitive + 完整 input，
+//     规则热加载（改任意一条规则）都会产生新签名，旧缓存 key 不可达
+//   - 新结果进暂存区（1024, FIFO），二次命中晋升热点区（3072, FIFO 批量淘汰）
+//   - 高基数洪水（大量一次性输入）只冲刷暂存区，热点区条目完整保留
+//   - 容量压力只做部分淘汰，绝不清空缓存、绝不跳过检测
 func matchRules(input string, rules []RuleEntry, caseInsensitive bool) *RuleEntry {
 	if input == "" || len(rules) == 0 {
 		return nil
@@ -46,23 +47,32 @@ func matchRules(input string, rules []RuleEntry, caseInsensitive bool) *RuleEntr
 		return nil
 	}
 
-	// worker 级匹配缓存：小输入复用匹配结果
+	// worker 级匹配缓存：小输入复用匹配结果（热点区 → 暂存区 → 晋升）
+	var cacheKey string
 	if len(input) <= matchCacheInputMax {
-		cacheKey := matchCacheKey(rules, caseInsensitive, input)
-		if v, ok := matchCache.Load(cacheKey); ok {
-			if v == nil {
+		cacheKey = matchCacheKey(rules, caseInsensitive, input)
+		if re, ok := matchHotZone.lookup(cacheKey); ok {
+			if re == nil {
 				return nil // 缓存的未命中
 			}
-			return v.(*RuleEntry)
+			return re
+		}
+		if re, ok := matchProbationZone.lookup(cacheKey); ok {
+			// 暂存区二次命中 → 晋升热点区
+			matchProbationZone.promote(cacheKey)
+			matchHotZone.insert(cacheKey, re)
+			if re == nil {
+				return nil
+			}
+			return re
 		}
 	}
 
 	result := matchRulesInternal(input, rules, caseInsensitive)
 
-	// 缓存匹配结果
-	if len(input) <= matchCacheInputMax {
-		cacheKey := matchCacheKey(rules, caseInsensitive, input)
-		setMatchCache(cacheKey, result)
+	// 缓存匹配结果（负缓存 nil 也写入，与命中路径语义一致）
+	if cacheKey != "" {
+		matchProbationZone.insert(cacheKey, result)
 	}
 
 	return result
@@ -161,44 +171,123 @@ func matchRulesBytes(input []byte, rules []RuleEntry, caseInsensitive bool) *Rul
 // regexCache 用于运行时动态编译的正则缓存（IP glob 等）
 var regexCache sync.Map // key: pattern → value: *regexp.Regexp
 
-// worker 级匹配缓存（对应 Lua 的 worker_match_cache）
-// 缓存小体积输入的匹配结果，避免重复正则/子串匹配
-var (
-	matchCache          sync.Map // key: string → value: *RuleEntry (nil = 未命中缓存)
-	matchCacheCount     int64    // atomic，当前缓存条目数
-	matchCacheMax       int64    = 4096
-	matchCacheInputMax         = 512 // 仅缓存输入 ≤512 字节的匹配结果
-)
-
-// matchCacheKey 生成缓存 key：规则集标识 + caseInsensitive + input
-func matchCacheKey(rules []RuleEntry, caseInsensitive bool, input string) string {
-	// 用 rules 切片的长度 + 第一条/最后一条规则的 Raw 作为规则集标识
-	// 不同文件/mtime 的 rules 内容不同，足以区分
-	sig := "0:0"
-	if len(rules) > 0 {
-		sig = fmt.Sprintf("%d:%s:%s", len(rules), rules[0].Raw, rules[len(rules)-1].Raw)
-	}
-	ci := "0"
-	if caseInsensitive {
-		ci = "1"
-	}
-	return sig + "|" + ci + "|" + input
+// worker 级分段匹配缓存（对应 NginxGuard Lua 版的分段缓存结构，并发安全）
+// store 用 sync.Map（命中路径无锁读），FIFO 队列/淘汰用 mutex 串行化（低频路径）。
+// owner 时间戳实现晋升后的残留槽位懒删除，重复晋升产生的重复槽位无害。
+type matchZone struct {
+	mu     sync.Mutex       // 保护 q/owner/head/seq（淘汰与入队）
+	store  sync.Map         // key → *RuleEntry (nil = 负缓存/未命中)
+	q      []string         // FIFO 环形队列, slot = seq % ring
+	owner  map[string]int64 // key → 入队 seq
+	head   int64
+	seq    int64
+	cap    int  // 容量
+	ring   int  // 环形队列长度 (2x cap)
+	evictN int  // 满时批量淘汰条数
 }
 
-// setMatchCache 写入匹配缓存，超过上限时清空重建
-func setMatchCache(key string, value *RuleEntry) {
-	if key == "" {
-		return
+func newMatchZone(cap, evictN int) *matchZone {
+	return &matchZone{
+		q:      make([]string, cap*2),
+		owner:  make(map[string]int64),
+		cap:    cap,
+		ring:   cap * 2,
+		evictN: evictN,
 	}
-	// 只在 key 不存在时递增计数
-	if _, loaded := matchCache.LoadOrStore(key, value); !loaded {
-		count := atomic.AddInt64(&matchCacheCount, 1)
-		if count > matchCacheMax {
-			// 清空缓存（简单策略，对应 Lua 的 worker_match_cache = {}）
-			matchCache = sync.Map{}
-			atomic.StoreInt64(&matchCacheCount, 0)
+}
+
+var (
+	matchProbationZone = newMatchZone(1024, 1)   // 暂存区: 新结果先进这里, 满时逐条 FIFO 淘汰
+	matchHotZone       = newMatchZone(3072, 384) // 热点区: 二次命中晋升, 满时批量淘汰 384 条
+	matchCacheInputMax = 512                     // 仅缓存输入 ≤512 字节的匹配结果
+)
+
+// lookup 读取缓存条目 (ok=true 表示 key 存在, 条目可能是 nil 负缓存)
+func (z *matchZone) lookup(key string) (*RuleEntry, bool) {
+	v, ok := z.store.Load(key)
+	if !ok {
+		return nil, false
+	}
+	re, _ := v.(*RuleEntry)
+	return re, true
+}
+
+// insert 写入新结果; 容量满时按 evictN 批量 FIFO 淘汰最旧条目 (只淘汰, 不清空)
+func (z *matchZone) insert(key string, value *RuleEntry) {
+	z.mu.Lock()
+	if z.seq-z.head >= int64(z.cap) {
+		n := int64(z.evictN)
+		if n > z.seq-z.head {
+			n = z.seq - z.head
+		}
+		for i := int64(0); i < n; i++ {
+			slot := z.head % int64(z.ring)
+			k := z.q[slot]
+			z.q[slot] = ""
+			z.head++
+			if k == "" {
+				continue
+			}
+			// owner 时间戳: 槽位对应 key 的当前入队才淘汰, 晋升残留的旧槽位跳过
+			if seq, ok := z.owner[k]; ok && seq == z.head-1 {
+				delete(z.owner, k)
+				z.store.Delete(k)
+			}
 		}
 	}
+	slot := z.seq % int64(z.ring)
+	z.q[slot] = key
+	z.owner[key] = z.seq
+	z.seq++
+	z.mu.Unlock()
+	z.store.Store(key, value)
+}
+
+// promote 从本区移除条目 (晋升到热点区前调用); 队列残留槽位由淘汰时懒删除
+func (z *matchZone) promote(key string) {
+	z.mu.Lock()
+	delete(z.owner, key)
+	z.mu.Unlock()
+	z.store.Delete(key)
+}
+
+// matchCacheStats 缓存占用诊断 (对应 Lua 版 get_match_cache_stats)
+func matchCacheStats() (hot int, probation int) {
+	matchHotZone.mu.Lock()
+	hot = int(matchHotZone.seq - matchHotZone.head)
+	matchHotZone.mu.Unlock()
+	matchProbationZone.mu.Lock()
+	probation = int(matchProbationZone.seq - matchProbationZone.head)
+	matchProbationZone.mu.Unlock()
+	return
+}
+
+// matchCacheKey 生成缓存 key：规则集内容 FNV-1a 签名 + caseInsensitive + 完整 input
+// 对规则 Raw 逐条哈希 —— 规则集任何变化（热加载改任意一条规则）都会产生不同签名,
+// 旧缓存 key 随之不可达（对应 Lua 版的 规则文件|mtime 标识）
+func matchCacheKey(rules []RuleEntry, caseInsensitive bool, input string) string {
+	const (
+		fnvOffset = 2166136261
+		fnvPrime  = 16777619
+	)
+	h := uint32(fnvOffset)
+	for i := range rules {
+		for j := 0; j < len(rules[i].Raw); j++ {
+			h ^= uint32(rules[i].Raw[j])
+			h *= fnvPrime
+		}
+		h ^= '\n'
+		h *= fnvPrime
+	}
+	if caseInsensitive {
+		h ^= 'i'
+		h *= fnvPrime
+	}
+	b := make([]byte, 0, len(input)+11)
+	b = strconv.AppendUint(b, uint64(h), 10)
+	b = append(b, '|')
+	b = append(b, input...)
+	return string(b)
 }
 
 // matchRegex 单条正则匹配（用于 IP glob 等）
