@@ -78,14 +78,55 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 		postBodyScanLimit = 2097152 // 2MB 默认
 	}
 
-	// 非 multipart 的 body：如果 ContentLength 已知且超过限制，直接拦截
-	// multipart body 不受此限制（由 fileUploadCheck 的 upload_filename_scan_limit 控制）
-	if !isMultipartForm && r.ContentLength > postBodyScanLimit {
+	// body 超限统一拦截: 非 multipart 与 multipart 流式扫描均适用 (对齐 Lua 修复后语义),
+	// multipart 大文件只扫前半段后放行属于部分扫描 fail-open, 必须拒绝。
+	// multipart streaming off 已在上方 return false, 不会到达此处
+	if r.ContentLength > postBodyScanLimit {
 		g.logger.Record("POSTOversize", reqURICached(r), "size:"+strconv.FormatInt(r.ContentLength, 10), "max:"+strconv.FormatInt(postBodyScanLimit, 10), g.getClientIPCached(r, cfg), r, cfg)
 		if cfg.WAFEnable == "on" {
 			g.wafOutput(w, cfg)
 		}
 		return true
+	}
+
+	// waf_enabled 缓存一次（对应 Lua 的 local waf_enabled = is_waf_enabled() == "on"）
+	wafEnabled := cfg.WAFEnable == "on"
+
+	// multipart streaming on: 完整读取 (spool, 永不截断) + 分块扫描整个 multipart body
+	// 对齐 Lua post_attack_check 的 streaming 实现 (64KB chunk + 2KB overlap)
+	if isMultipartForm {
+		spool, err := readBodyFull(r.Body)
+		r.Body.Close()
+		if err != nil {
+			return false
+		}
+		if spool.size == 0 {
+			spool.Close()
+			return false
+		}
+		// ContentLength 未知时二次确认真实大小, 超限拒绝
+		if spool.size > postBodyScanLimit {
+			g.logger.Record("POSTOversize", reqURICached(r), "size:"+strconv.FormatInt(spool.size, 10), "max:"+strconv.FormatInt(postBodyScanLimit, 10), g.getClientIPCached(r, cfg), r, cfg)
+			spool.Close()
+			if cfg.WAFEnable == "on" {
+				g.wafOutput(w, cfg)
+			}
+			return true
+		}
+		rd, closeRd := spool.ReaderCloser()
+		matched := scanBodyStreaming(rd, rules)
+		closeRd()
+		if matched != nil {
+			g.logger.Record("POST", reqURICached(r), "-", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+			spool.Close()
+			if wafEnabled {
+				g.wafOutput(w, cfg)
+			}
+			return true
+		}
+		// 恢复完整 body 供后续 handler 使用
+		spool.RestoreBody(r)
+		return false
 	}
 
 	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, postBodyScanLimit+1)) // +1 to detect truncation
@@ -96,8 +137,7 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 
 	// 截断检测：如果读取到的字节数超过限制，说明 body 大于阈值
 	// 对应 Lua: file_size > post_body_scan_limit → 拦截
-	// multipart body 不受此限制（由 fileUploadCheck 处理）
-	if !isMultipartForm && int64(len(bodyBytes)) > postBodyScanLimit {
+	if int64(len(bodyBytes)) > postBodyScanLimit {
 		g.logger.Record("POSTOversize", reqURICached(r), "size:>"+strconv.FormatInt(postBodyScanLimit, 10), "max:"+strconv.FormatInt(postBodyScanLimit, 10), g.getClientIPCached(r, cfg), r, cfg)
 		if cfg.WAFEnable == "on" {
 			g.wafOutput(w, cfg)
@@ -107,9 +147,6 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 
 	// 恢复 body 供后续 handler 使用（用 bytes.NewReader 避免额外的 string 拷贝）
 	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-
-	// waf_enabled 缓存一次（对应 Lua 的 local waf_enabled = is_waf_enabled() == "on"）
-	wafEnabled := cfg.WAFEnable == "on"
 
 	// 1. form-urlencoded: 解析 key/value 逐一匹配
 	//    对应 Lua: should_parse_post_args = is_form_urlencoded
@@ -231,4 +268,42 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 	}
 
 	return false
+}
+
+// scanBodyStreaming 分块流式扫描 (对应 Lua post_attack_check 的 streaming 实现):
+// 64KB chunk + 2KB overlap, 每个 chunk 先 matchRulesBytes (内置关键词预过滤),
+// 含编码标记时 full_decode 后重试。用于 multipart streaming on 的整 body 扫描
+func scanBodyStreaming(rd io.Reader, rules []RuleEntry) *RuleEntry {
+	const chunkSize = 65536
+	const overlap = 2048
+	var prevTail []byte
+	for {
+		chunk := make([]byte, chunkSize)
+		n, rerr := io.ReadFull(rd, chunk)
+		if n > 0 {
+			data := make([]byte, 0, len(prevTail)+n)
+			data = append(data, prevTail...)
+			data = append(data, chunk[:n]...)
+			if matched := matchRulesBytes(data, rules, true); matched != nil {
+				return matched
+			}
+			str := string(data)
+			if hasEncodeMarkers(str) {
+				if decoded, changed := fullDecode(str); changed {
+					if matched := matchRules(decoded, rules, true); matched != nil {
+						return matched
+					}
+				}
+			}
+			if len(data) > overlap {
+				prevTail = data[len(data)-overlap:]
+			} else {
+				prevTail = data
+			}
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	return nil
 }

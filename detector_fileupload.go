@@ -1,7 +1,6 @@
 package caddyguard
 
 import (
-	"bytes"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -36,18 +35,22 @@ func (g *Guard) fileUploadCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 	if len(fileRules) == 0 && len(postRules) == 0 {
 		return false
 	}
-	// 读取完整 body 以便后续恢复（multipart 解析会消费 reader）
-	// 对应 Lua: upload_filename_scan_limit 控制扫描上限
-	maxSize := int64(32 * 1024 * 1024) // 32MB 硬上限防止 OOM
-	// cfg.UploadFilenameScanLimit 控制扫描范围，但不影响 body 读取（multipart 需完整读取才能恢复）
-	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxSize))
+	// 完整读取 body 以便后续恢复（multipart 解析会消费 reader）。
+	// 对齐 Lua/nginx 版: body 完整落盘/驻留, 永不截断 —— 32MB 硬上限会把超大
+	// 上传截断后恢复给 handler, 属于业务损坏。≤8MB 驻留内存, 超出落盘临时文件,
+	// 恢复的 body 关闭时自动清理临时文件
+	spool, err := readBodyFull(r.Body)
 	r.Body.Close()
-	if err != nil || len(bodyBytes) == 0 {
+	if err != nil {
+		return false
+	}
+	if spool.size == 0 {
+		spool.Close()
 		return false
 	}
 
 	// 恢复 body 供后续 handler 使用
-	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	spool.RestoreBody(r)
 
 	// 使用 multipart.Reader 流式解析，只读 header 不读文件内容
 	// 用 mime.ParseMediaType 正确提取 boundary（兼容大小写变体如 Multipart/Form-Data）
@@ -60,7 +63,11 @@ func (g *Guard) fileUploadCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 		// 回退：直接截取 boundary=
 		boundary = strings.TrimPrefix(strings.ToLower(contentType), "multipart/form-data; boundary=")
 	}
-	reader := multipart.NewReader(bytes.NewReader(bodyBytes), boundary)
+	// multipart.Reader 直接从 spool 流式解析 (≤8MB 内存 / 超出走临时文件句柄),
+	// 只读 header 不读文件内容, 大 body 不会重新全量驻留内存
+	bodyReader, closeBodyReader := spool.ReaderCloser()
+	defer closeBodyReader()
+	reader := multipart.NewReader(bodyReader, boundary)
 
 	for {
 		part, err := reader.NextPart()
