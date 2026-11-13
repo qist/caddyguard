@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // RuleEntry 规则条目：加载阶段预编译正则，请求阶段零编译开销
@@ -45,6 +46,12 @@ func matchRules(input string, rules []RuleEntry, caseInsensitive bool) *RuleEntr
 	// 输入最小长度预检（对应 Lua 的 MIN_RULE_LEN = 2）
 	if len(input) < 2 {
 		return nil
+	}
+
+	// 缓存开关关闭（config.json "match_cache": "off"）：不读不写缓存，
+	// 每次完整检测 —— 与开启状态的检测结果语义一致，用于 A/B 一致性测试
+	if !matchCacheEnabled.Load() {
+		return matchRulesInternal(input, rules, caseInsensitive)
 	}
 
 	// worker 级匹配缓存：小输入复用匹配结果（热点区 → 暂存区 → 晋升）
@@ -252,6 +259,22 @@ func (z *matchZone) promote(key string) {
 	delete(z.owner, key)
 	z.store.Delete(key)
 	z.mu.Unlock()
+}
+
+// matchCacheEnabled 匹配缓存进程级开关（对应 Lua config_match_cache）
+// 缓存池为进程级共享（key 不含域名，同规则集跨域名结果相同），
+// 因此开关仅由 config.json 全局配置驱动，不支持 domain.json 域名级覆盖
+var matchCacheEnabled atomic.Bool
+
+func init() { matchCacheEnabled.Store(true) } // 默认开启（atomic.Bool 零值为 false，必须显式初始化）
+
+// SetMatchCacheEnabled 设置匹配缓存开关（config.json 的 match_cache 解析后调用）
+func SetMatchCacheEnabled(on bool) { matchCacheEnabled.Store(on) }
+
+// applyMatchCacheSwitch 将 Config 的 match_cache 字段同步到进程级开关
+// 语义与 Lua 版一致：仅 "off" 关闭，其余值（含空串默认值）视为开启
+func applyMatchCacheSwitch(cfg Config) {
+	SetMatchCacheEnabled(cfg.MatchCache != "off")
 }
 
 // matchCacheStats 缓存占用诊断 (对应 Lua 版 get_match_cache_stats)

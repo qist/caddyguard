@@ -232,10 +232,11 @@ caddy run --config /etc/caddy/caddy.json
 | `multipart_streaming_check` | string | `"off"` | multipart body 流式内容扫描开关（`post.rule`）。默认 `off`，关闭时仍保留文件名扩展名检查 |
 | `upload_filename_scan_limit` | int | `0` | multipart 文件名扫描上限（字节）。`0`=扫描整个文件；正整数=只扫描前 N 字节 |
 | `post_body_scan_limit` | int | `2097152` | 非 multipart body 扫描上限（字节）。超过此值直接拦截，避免部分扫描后误放行 |
+| `match_cache` | string | `"on"` | 有界分段匹配缓存开关（热点区 3072 + 暂存区 1024）。`"on"`（默认）= 缓存小输入（≤512B）匹配结果加速重复检测，缓存只优化检测速度、绝不改变检测结果；`"off"` = 每次完整规则检测（A/B 一致性测试用）。**注意**：缓存为进程级共享（key 不含域名），此开关仅由 `config.json` 全局配置生效，不支持 `domain.json` 域名级覆盖 |
 | `waf_output` | string | `"html"` | 拦截响应模式：`"html"` 返回拦截页面，`"redirect"` 302 跳转 |
 | `waf_redirect_url` | string | - | `waf_output` 为 redirect 时的跳转 URL |
 
-> **完整配置参数参考**：上表中的所有参数均可作为 `config.json`（全局配置）和 `domain.json`（域名级覆盖）的键名。`config.json` 中配置全局默认值，`domain.json` 中按域名只列出需要覆盖的项，未列出的项自动回退到全局配置。`rule_dir` 仅在 `domain.json` 中使用（指定域名专用规则目录），`log_dir` 仅在 `config.json` 中使用（全局日志目录）。
+> **完整配置参数参考**：上表中的所有参数均可作为 `config.json`（全局配置）和 `domain.json`（域名级覆盖）的键名。`config.json` 中配置全局默认值，`domain.json` 中按域名只列出需要覆盖的项，未列出的项自动回退到全局配置。`rule_dir` 仅在 `domain.json` 中使用（指定域名专用规则目录），`log_dir` 仅在 `config.json` 中使用（全局日志目录），`match_cache` 仅在 `config.json` 中使用（进程级缓存开关，不支持域名级覆盖）。
 
 ### domain.json 域名级覆盖
 

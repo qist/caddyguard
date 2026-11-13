@@ -449,7 +449,9 @@ func (rc *RuleCache) GetGlobalConfig() Config {
 	// 需要检查 mtime
 	ver, exists := getFileVersion(path)
 	if !exists {
-		return DefaultConfig() // 文件不存在，用默认值
+		cfg := DefaultConfig() // 文件不存在，用默认值
+		applyMatchCacheSwitch(cfg)
+		return cfg
 	}
 
 	if entry != nil && entry.ver == ver {
@@ -470,11 +472,14 @@ func (rc *RuleCache) GetGlobalConfig() Config {
 
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return DefaultConfig()
+		cfg := DefaultConfig()
+		applyMatchCacheSwitch(cfg)
+		return cfg
 	}
 
 	cfg := DefaultConfig() // 先填默认值
 	if err := json.Unmarshal(content, &cfg); err != nil {
+		applyMatchCacheSwitch(cfg)
 		return DefaultConfig() // 解析失败，用默认值
 	}
 
@@ -483,6 +488,8 @@ func (rc *RuleCache) GetGlobalConfig() Config {
 		config:        cfg,
 		lastCheckNano: time.Now().UnixNano(),
 	}
+	// 同步进程级匹配缓存开关（config.json "match_cache"，对应 Lua config_match_cache）
+	applyMatchCacheSwitch(cfg)
 	return cfg
 }
 

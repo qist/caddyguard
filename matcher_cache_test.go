@@ -195,3 +195,60 @@ func TestMatchRules_Concurrent(t *testing.T) {
 		t.Error(e)
 	}
 }
+
+// T6 缓存开关 (config.json "match_cache", 对应 Lua config_match_cache):
+// off 时不读不写缓存、检测结果与开启状态逐请求 100% 一致、恢复 on 后缓存重新生效
+// 注: 放在文件末尾执行, 避免改变全局开关状态影响 T2 的精确断言
+func TestMatchRules_CacheToggle(t *testing.T) {
+	rules := mustCacheTestRules(t, cacheTestRuleSrc)
+	inputs := cacheTestInputs()
+
+	// 独立签名规则集的基线输入 (排除前置测试遗留条目的干扰)
+	prefix := "togglecase"
+	onInputs := make([]string, 0, len(inputs)+1)
+	for _, in := range inputs {
+		onInputs = append(onInputs, prefix+" "+in)
+	}
+	onInputs = append(onInputs, prefix+" has unionselect inside")
+
+	defer SetMatchCacheEnabled(true) // 恢复默认开启
+
+	// on 基线: 逐请求记录结果 (真值 = matchRulesInternal)
+	onResults := make([]*RuleEntry, len(onInputs))
+	for i, in := range onInputs {
+		onResults[i] = matchRules(in, rules, true)
+	}
+	hotOn, probOn := matchCacheStats()
+	if hotOn+probOn == 0 {
+		t.Fatal("cache should be non-empty with cache enabled")
+	}
+
+	// off 状态: 不读不写缓存, 逐请求对拍 on 基线
+	SetMatchCacheEnabled(false)
+	hb, pb := matchCacheStats()
+	beforeOff := hb + pb
+	for i, in := range onInputs {
+		got := matchRules(in, rules, true)
+		want := matchRulesInternal(in, rules, true)
+		if (got == nil) != (want == nil) || (got != nil && got.Raw != want.Raw) {
+			t.Errorf("off result mismatch with truth at %d: input=%q got=%v want=%v", i, trunc(in), got, want)
+		}
+		if (got == nil) != (onResults[i] == nil) || (got != nil && got.Raw != onResults[i].Raw) {
+			t.Errorf("off result mismatch with on baseline at %d: input=%q", i, trunc(in))
+		}
+	}
+	ha, pa := matchCacheStats()
+	afterOff := ha + pa
+	if afterOff != beforeOff {
+		t.Errorf("cache occupied changed while disabled: total %d -> %d", beforeOff, afterOff)
+	}
+
+	// 恢复 on: 缓存重新生效且结果不变
+	SetMatchCacheEnabled(true)
+	for i, in := range onInputs {
+		assertSameAsInternal(t, rules, in, true)
+		if (onResults[i] == nil) != (matchRulesInternal(in, rules, true) == nil) {
+			t.Errorf("post-restore baseline drift at %d: input=%q", i, trunc(in))
+		}
+	}
+}

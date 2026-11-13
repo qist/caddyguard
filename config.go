@@ -37,6 +37,13 @@ type Config struct {
 	MultipartStreamingCheck string `json:"multipart_streaming_check"`  // multipart body 流式扫描开关 "on"/"off"
 	UploadFilenameScanLimit int64  `json:"upload_filename_scan_limit"` // multipart 文件名扫描上限（字节），0=全扫
 	PostBodyScanLimit       int64  `json:"post_body_scan_limit"`       // 非 multipart body 扫描上限（字节），超过直接拦截
+
+	// 匹配缓存开关（对应 Lua config_match_cache）
+	// "on" (默认) = 缓存小输入(≤512B)匹配结果加速重复检测，绝不改变检测结果
+	// "off"       = 每次完整检测（A/B 一致性测试用）
+	// 注意：缓存为进程级共享（key 不含域名），此开关仅由 config.json 全局配置生效，
+	//       不支持 domain.json 域名级覆盖
+	MatchCache string `json:"match_cache"`
 }
 
 // DefaultConfig 返回默认配置
@@ -71,5 +78,7 @@ func DefaultConfig() Config {
 		MultipartStreamingCheck: "off",   // 默认关闭：multipart 只做 filename 检查，跳过 raw body 流式扫描
 		UploadFilenameScanLimit: 0,       // 0 = 扫描整个上传临时文件
 		PostBodyScanLimit:       2097152, // 2MB：超过此值直接拦截
+
+		MatchCache: "on", // 分段匹配缓存默认开启（config_match_cache）
 	}
 }
