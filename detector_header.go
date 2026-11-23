@@ -69,7 +69,7 @@ func (g *Guard) headerAttackCheck(w http.ResponseWriter, r *http.Request, cfg Co
 	}
 
 	if matched := matchRules(headerText, rules, true); matched != nil {
-		g.logger.Record("Header", reqURICached(r), "", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+		g.logger.Record("Deny_Header", reqURICached(r), "", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 		g.wafOutput(w, cfg)
 		return true
 	}

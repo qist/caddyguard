@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -69,6 +70,10 @@ type Guard struct {
 
 	cleanupCtx    context.Context    `json:"-"`
 	cleanupCancel context.CancelFunc `json:"-"`
+
+	// 三层组合规则引擎（懒初始化，兼容测试中直接构造 Guard）
+	comboOnce sync.Once    `json:"-"`
+	combo     *comboEngine `json:"-"`
 }
 
 func (*Guard) CaddyModule() caddy.ModuleInfo {

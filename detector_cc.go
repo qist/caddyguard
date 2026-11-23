@@ -37,7 +37,7 @@ func (g *Guard) ccAttackCheck(w http.ResponseWriter, r *http.Request, cfg Config
 
 	if count > ccCount {
 		logData := fmt.Sprintf("count=%d threshold=%d window=%ds mode=%s", count, ccCount, ccSeconds, ccModeString(ccMode))
-		g.logger.Record("CCAttack", reqURICached(r), logData, "CC Rate Limit", clientIP, r, cfg)
+		g.logger.Record("CC_Attack", reqURICached(r), logData, "CC Rate Limit", clientIP, r, cfg)
 
 		// 自动拉黑：封禁粒度跟随 cc_mode
 		// "ip"/"ip_uri" 封禁整个 IP（全局，所有域名）；"ip_host" 仅封禁 域名+IP，

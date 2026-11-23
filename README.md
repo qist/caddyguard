@@ -6,6 +6,7 @@ Caddy v2 WAF (Web Application Firewall) 插件 — 用 Go 原生编写，为 Cad
 
 - **全局自动生效**：全局配置一次 `rule_dir`，所有站点自动启用 WAF，无需每个站点单独写 `caddyguard` 指令（通过 `caddyguardfile` 适配器实现）
 - **13 项检测链**：白名单 IP/URL/UA、黑名单 IP、CC 攻击防护、URL 路径/参数检测（含 256+ 参数截断兜底）、User-Agent/请求头/Cookie/Referer 检测、POST body 检测（含大 body 超限拦截 + 实体拆分兜底）、文件上传扩展名检测
+- **三层组合规则**：`combo.jsonl` 支持 L1 检测器组合、内联请求条件、BLOCK/LOG/ALERT/SCORE/CHALLENGE 动作，2 秒节流热加载；与 nginxguard `engine.lua` 语义对齐
 - **IPv4/IPv6 双栈**：IP 黑白名单同时支持 IPv4 和 IPv6，支持 CIDR 表示法（`192.168.1.0/24`、`2001:db8::/32`）、glob 通配符（`192.168.*.*`、`2001:db8::*`）和精确匹配
 - **高性能**：正则预编译（含 `(?i)` 大小写不敏感版本）+ POST body 关键词自动提取预过滤 + 64 分片 CC 存储 + Config 预合并缓存，WAF 全规则开启仅 ~1.7% 性能开销
 - **热加载**：规则和配置文件修改后 2 秒内自动生效，无需重启 Caddy
@@ -176,6 +177,7 @@ caddy run --config /etc/caddy/caddy.json
 /etc/caddyguard/rule-config/
 ├── config.json              # 全局 WAF 配置
 ├── domain.json              # 域名级配置覆盖
+├── combo.jsonl              # 三层组合规则（JSONL，一行一条，10s 热加载）
 ├── url.rule                 # URL 路径黑名单
 ├── args.rule                # URL 参数黑名单（SQL注入/XSS/SSTI/RCE等）
 ├── post.rule                # POST body 黑名单
@@ -233,6 +235,7 @@ caddy run --config /etc/caddy/caddy.json
 | `upload_filename_scan_limit` | int | `0` | multipart 文件名扫描上限（字节）。`0`=扫描整个文件；正整数=只扫描前 N 字节 |
 | `post_body_scan_limit` | int | `2097152` | 非 multipart body 扫描上限（字节）。超过此值直接拦截，避免部分扫描后误放行 |
 | `match_cache` | string | `"on"` | 有界分段匹配缓存开关（热点区 3072 + 暂存区 1024）。`"on"`（默认）= 缓存小输入（≤512B）匹配结果加速重复检测，缓存只优化检测速度、绝不改变检测结果；`"off"` = 每次完整规则检测（A/B 一致性测试用）。**注意**：缓存为进程级共享（key 不含域名），此开关仅由 `config.json` 全局配置生效，不支持 `domain.json` 域名级覆盖 |
+| `score_block_threshold` | int | `0` | 组合规则 `SCORE` 累计拦截阈值：`0`=只记分不拦截；`1`=开启拦截（任意 SCORE 命中即拦，等价开关）；`>1`=同一请求累计达到该分值才拦。支持域名级覆盖 |
 | `waf_output` | string | `"html"` | 拦截响应模式：`"html"` 返回拦截页面，`"redirect"` 302 跳转 |
 | `waf_redirect_url` | string | - | `waf_output` 为 redirect 时的跳转 URL |
 
@@ -497,11 +500,40 @@ YandexBot
 
 - 关闭开关：`config.json` 中 `"header_check": "off"`，支持域名级覆盖
 - 单路径放行：`whiteurl.rule` 扩展格式加 `header` 跳过项，如 `/callback/ header,url_attack`
-- 日志类型：`Header`（`attack_method` 字段）
+- 日志类型：`Deny_Header`（`attack_method` 字段）
+
+## 三层组合规则（combo.jsonl）
+
+由 `engine.go` 实现，语义与 nginxguard `engine.lua` 对齐；完整语法、检测器和边界见 [`docs/三层规则引擎.md`](docs/三层规则引擎.md)。
+
+| 层 | 说明 |
+|---|---|
+| L1 检测器 | `url` / `url_args` / `post` / `header` / `cookie` / `user_agent` / `referer` / `file_upload` / `cc` / `black_ip` / `dynamic_black_ip`；复用现有检测器，每请求最多执行一次并缓存结果 |
+| L2 表达式 | `AND` / `OR` / `NOT` / `AT_LEAST` + 内联请求条件（uri/args/method/protocol/header/cookie/body/ip/header_count 等） |
+| L3 动作 | `BLOCK`（默认）/ `LOG` / `ALERT` / `SCORE` / `CHALLENGE` |
+
+规则一行一条 JSON，`#` 开头为注释，修改后自动热加载（与其它规则文件同一节流窗口）：
+
+```json
+{"id":"scanner-on-api","if":["AND","user_agent",{"cond":"uri","op":"prefix","value":"/api/"}],"action":"BLOCK"}
+{"id":"sqli-plus-rce","if":["AND","url_args","post"],"action":"SCORE","score":30}
+```
+
+- `SCORE` 累计到 `score_block_threshold`：`0`（默认）= 只记分；`1` = 任意 SCORE 命中即拦（等价开关）；`>1` = 累计达到才拦。支持 `domain.json` 域名级覆盖。
+- 阻断规则遇到无法判定的条件（检测器异常、请求体超过 2 MiB 等）采取 **fail-closed**：记录 `Combo_INDETERMINATE` 并拦截。因此 **大于 2 MiB 的 POST/上传会被组合规则拦截**，与 nginxguard 一致；引擎 body 上限固定 2 MiB，不随 `post_body_scan_limit` 变化。
+- 内联 `re` 在加载期用 Go RE2 预编译，非法正则/`flags` 的整条规则会被记录错误并丢弃；注意 RE2 不支持 PCRE 的回溯引用/lookaround。
+- 内联条件默认忽略大小写：`re` 默认 `(?i)`，`contains`/`prefix` 默认忽略，`eq` 除 `method`/`protocol` 外默认忽略；`re` 用 `flags`（不含 `i`）或 `case_sensitive:true` 关闭，其余用 `icase:false` 关闭。
+- `NOT` 子树不允许包含 L1 检测器，避免“检查关闭/跳过”被取反成命中。
+- 域名级 `rule_dir` 存在 `combo.jsonl` 时优先使用，文件不存在回退全局；存在但为空表示该域名关闭组合规则。
+- 部署/升级时需同时携带 `combo.jsonl`；文件不存在时组合规则关闭，传统检测链不受影响。
+- 域名级覆盖：`domain.json` 与 `config.json` 使用相同键名，`score_block_threshold`、各检测开关、body 阈值、`rule_dir` 等均可按域名覆盖；`log_dir`/`match_cache` 是进程级配置，不支持域名级覆盖。
+- 向后兼容：`score_block_threshold` 与 `combo.jsonl` 对旧版 CaddyGuard 是未知字段/未读取文件，会被忽略且不影响传统检测；可先下发规则和域名配置，再按需升级二进制（已用 2026-09-17 旧二进制验证：新 config/combo/domain 可正常启动和检测）。
 
 ## 检测链
 
 按检测成本从低到高排序，命中即返回：
+
+> 白名单 IP 通过后、传统检测之前先执行组合规则；组合规则引用过的 L1 检测器结果会被缓存，后续传统检测直接复用、不重复扫描。
 
 | 顺序 | 检测项 | 来源 | 说明 |
 |------|--------|------|------|
@@ -573,7 +605,7 @@ CC 计数 key 与自动拉黑 key 的粒度跟随 `cc_mode`（与 nginxguard Lua
     "local_time": "2026-08-13 12:30:00",
     "server_name": "www.example.com",
     "user_agent": "sqlmap/1.0",
-    "attack_method": "UserAgent",
+    "attack_method": "Deny_USER_AGENT",
     "req_url": "/?id=1+union+select",
     "req_data": "",
     "rule_tag": "(sqlmap|nmap|...)"
@@ -587,7 +619,7 @@ CC 计数 key 与自动拉黑 key 的粒度跟随 `cc_mode`（与 nginxguard Lua
 | `local_time` | 本地时间 |
 | `server_name` | 域名 |
 | `user_agent` | 请求 UA |
-| `attack_method` | 命中的检测项（UserAgent / Header / URL / URLArgs / Cookie / Referer / POST / FileUpload / POSTOversize） |
+| `attack_method` | 命中的检测项，与 NginxGuard 一致：`Deny_USER_AGENT` / `Deny_Header` / `Deny_URL` / `Deny_URL_Args` / `Deny_Cookie` / `Deny_Referer` / `Deny_URL_POST` / `Deny_URL_POST_Oversize` / `Deny_File_Upload` / `BlackList_IP` / `Dynamic_Block_IP` / `CC_Attack` / `CCAutoBan`，以及组合规则的 `Combo_*` |
 | `req_url` | 请求 URL |
 | `req_data` | POST body 数据（仅 POST 检测时） |
 | `rule_tag` | 命中的具体规则内容 |
@@ -614,6 +646,8 @@ CC 计数 key 与自动拉黑 key 的粒度跟随 `cc_mode`（与 nginxguard Lua
 | 路径级 WAF on（同配置） | 10,470 | 24ms | — | 同配置 WAF on 路径对比 |
 
 > 2026-09-17 复测（同步 nginxguard 最新规则 + 新增第 13 项请求头检测后，同一测试机 2.180）：WAF 全开吞吐下降 ~3.5%（6,121 vs 6,341），相比优化前（11.4%）仍大幅缩减；新增请求头检测与规则集扩充带来的额外开销约 1.8 个百分点。
+
+> 2026-11-23 三层规则引擎复测（同一测试机 2.180，50k 请求 / c=200）：无 WAF 5,724.75 rps、WAF 关 5,667.06 rps、WAF 全开（不含 CC）5,358.36 rps，开销约 6.4%；攻击 UA 9,480.15 rps；POST body 场景 1,667 rps；并发梯度 c500 4,597.86 rps，全场景除 CC 预期拦截的 D2 外 Fail=0。
 
 ### 单项检测性能对比
 
@@ -720,8 +754,10 @@ CC 计数 key 与自动拉黑 key 的粒度跟随 `cc_mode`（与 nginxguard Lua
 | header.rule 热加载 | ✅ | 新增/修改规则 4s 内生效，无需重启 |
 | 回归测试 180 项 | ✅ | test_full.sh（2.180）180/180 全部通过，0 失败（含请求头检测 9 项、实体拆分兜底 1 项、UA 边界/误杀 12 项） |
 | 规则全量测试 | ✅ | test_rules.sh（2.180）45/45 通过 |
+| 三层组合规则专项 | ✅ | test_combo.sh（2.180）22/22 通过：CVE 虚拟补丁、大小写默认、LOG/SCORE、坏正则丢弃、L1 缓存复用、2MiB 边界 |
+| HTTP/2 规则（真实 TLS） | ✅ | test_h2.sh（2.180，corefusion tycng.com 证书，:19443）7/7 通过：H2+90 头+Content-Type 且无 CL/TE → 403；HTTP/1.1、带 CL、无 Content-Type、头数不足均放行 |
 | cc_mode 计数粒度回归 | ✅ | test_cc_mode.sh（2.180）11/11 通过：ip 跨 URI 共享 / ip_uri 单 URI 独立 / ip_host 域名独立 + 封禁隔离 / 全局封禁跨域名兜底 / domain.json 域名级 cc_mode 覆盖 |
-| 稳定性套件 S1~S8 | ✅ | stability_test.sh（2.180）25 PASS / 0 FAIL：10 分钟压测内存稳定（+16MB 预热后持平）、100 万随机 URL 仅 +5MB 且过期回收、热加载/重启/ReDoS/畸形请求不崩溃、攻击拦截 16/16 |
+| 稳定性套件 S1~S8 | ✅ | stability_test.sh（2.180）25 PASS / 0 FAIL（2026-11-23 复测仍为 25/0）：10 分钟压测内存稳定（+16MB 预热后持平）、100 万随机 URL 仅 +5MB 且过期回收、热加载/重启/ReDoS/畸形请求不崩溃、攻击拦截 16/16 |
 | JSON 配置模式 | ✅ | caddy_waf.json（方式 3）8/8 通过，含请求头检测与 subroute `waf_enable off` |
 | 全场景压测 v4 | ✅ | run_bench_v4.sh（2.180）17 个场景 Fail=0 |
 

@@ -23,7 +23,7 @@ func (g *Guard) urlAttackCheck(w http.ResponseWriter, r *http.Request, cfg Confi
 
 	// 1. 先匹配原始 URI
 	if matched := matchRules(reqURI, rules, true); matched != nil {
-		g.logger.Record("URLAttack", reqURI, "", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+		g.logger.Record("Deny_URL", reqURI, "", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 		g.wafOutput(w, cfg)
 		return true
 	}
@@ -33,7 +33,7 @@ func (g *Guard) urlAttackCheck(w http.ResponseWriter, r *http.Request, cfg Confi
 		decodedURI, err := url.PathUnescape(reqURI)
 		if err == nil && decodedURI != reqURI {
 			if matched := matchRules(decodedURI, rules, true); matched != nil {
-				g.logger.Record("URLAttack", reqURI, "", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+				g.logger.Record("Deny_URL", reqURI, "", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 				g.wafOutput(w, cfg)
 				return true
 			}
@@ -77,7 +77,7 @@ func (g *Guard) urlArgsAttackCheck(w http.ResponseWriter, r *http.Request, cfg C
 		// 检查参数名（key）
 		if key != "" {
 			if matched := matchRules(key, rules, true); matched != nil {
-				g.logger.Record("URLArgs", reqURICached(r), "key:"+key, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+				g.logger.Record("Deny_URL_Args", reqURICached(r), "key:"+key, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 				g.wafOutput(w, cfg)
 				return true
 			}
@@ -85,7 +85,7 @@ func (g *Guard) urlArgsAttackCheck(w http.ResponseWriter, r *http.Request, cfg C
 			if hasEncodeMarkers(key) {
 				if decoded, changed := fullDecode(key); changed {
 					if matched := matchRules(decoded, rules, true); matched != nil {
-						g.logger.Record("URLArgs", reqURICached(r), "key:"+key, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+						g.logger.Record("Deny_URL_Args", reqURICached(r), "key:"+key, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 						g.wafOutput(w, cfg)
 						return true
 					}
@@ -100,7 +100,7 @@ func (g *Guard) urlArgsAttackCheck(w http.ResponseWriter, r *http.Request, cfg C
 		}
 
 		if matched := matchRules(val, rules, true); matched != nil {
-			g.logger.Record("URLArgs", reqURICached(r), val, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+			g.logger.Record("Deny_URL_Args", reqURICached(r), val, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 			g.wafOutput(w, cfg)
 			return true
 		}
@@ -109,7 +109,7 @@ func (g *Guard) urlArgsAttackCheck(w http.ResponseWriter, r *http.Request, cfg C
 		if hasEncodeMarkers(val) {
 			if decoded, changed := fullDecode(val); changed {
 				if matched := matchRules(decoded, rules, true); matched != nil {
-					g.logger.Record("URLArgs", reqURICached(r), val, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+					g.logger.Record("Deny_URL_Args", reqURICached(r), val, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 					g.wafOutput(w, cfg)
 					return true
 				}
@@ -124,7 +124,7 @@ func (g *Guard) urlArgsAttackCheck(w http.ResponseWriter, r *http.Request, cfg C
 		if rawArgs != "" {
 			// 1. 匹配原始 RawQuery
 			if matched := matchRules(rawArgs, rules, true); matched != nil {
-				g.logger.Record("URLArgs", reqURICached(r), "truncated_query", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+				g.logger.Record("Deny_URL_Args", reqURICached(r), "truncated_query", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 				g.wafOutput(w, cfg)
 				return true
 			}
@@ -133,7 +133,7 @@ func (g *Guard) urlArgsAttackCheck(w http.ResponseWriter, r *http.Request, cfg C
 			if strings.Contains(rawArgs, "+") {
 				normalizedArgs = strings.ReplaceAll(rawArgs, "+", " ")
 				if matched := matchRules(normalizedArgs, rules, true); matched != nil {
-					g.logger.Record("URLArgs", reqURICached(r), "truncated_query", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+					g.logger.Record("Deny_URL_Args", reqURICached(r), "truncated_query", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 					g.wafOutput(w, cfg)
 					return true
 				}
@@ -142,7 +142,7 @@ func (g *Guard) urlArgsAttackCheck(w http.ResponseWriter, r *http.Request, cfg C
 			if hasEncodeMarkers(rawArgs) {
 				if decoded, changed := fullDecode(rawArgs); changed {
 					if matched := matchRules(decoded, rules, true); matched != nil {
-						g.logger.Record("URLArgs", reqURICached(r), "truncated_query", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+						g.logger.Record("Deny_URL_Args", reqURICached(r), "truncated_query", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 						g.wafOutput(w, cfg)
 						return true
 					}
@@ -152,7 +152,7 @@ func (g *Guard) urlArgsAttackCheck(w http.ResponseWriter, r *http.Request, cfg C
 			if normalizedArgs != "" && hasEncodeMarkers(normalizedArgs) {
 				if decoded, changed := fullDecode(normalizedArgs); changed {
 					if matched := matchRules(decoded, rules, true); matched != nil {
-						g.logger.Record("URLArgs", reqURICached(r), "truncated_query", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+						g.logger.Record("Deny_URL_Args", reqURICached(r), "truncated_query", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 						g.wafOutput(w, cfg)
 						return true
 					}

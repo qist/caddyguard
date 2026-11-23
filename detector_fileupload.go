@@ -86,7 +86,7 @@ func (g *Guard) fileUploadCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 		if filename != "" && len(fileRules) > 0 {
 			if matched := matchRules(filename, fileRules, true); matched != nil {
 				part.Close()
-				g.logger.Record("FileUpload", reqURICached(r), filename, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+				g.logger.Record("Deny_File_Upload", reqURICached(r), filename, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 				g.wafOutput(w, cfg)
 				return true
 			}
@@ -101,14 +101,14 @@ func (g *Guard) fileUploadCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 			if formName != "" {
 				if matched := matchRules(formName, postRules, true); matched != nil {
 					part.Close()
-					g.logger.Record("POST", reqURICached(r), "field:"+formName, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+					g.logger.Record("Deny_URL_POST", reqURICached(r), "field:"+formName, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 					g.wafOutput(w, cfg)
 					return true
 				}
 			}
 
 			// 读取字段值（限制大小 1MB）
-		 fieldValueBytes, err := io.ReadAll(io.LimitReader(part, 1024*1024))
+			fieldValueBytes, err := io.ReadAll(io.LimitReader(part, 1024*1024))
 			if err == nil && len(fieldValueBytes) > 0 {
 				// 检查原始值
 				if matched := matchRulesBytes(fieldValueBytes, postRules, true); matched != nil {
@@ -116,7 +116,7 @@ func (g *Guard) fileUploadCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 					if len(logData) > 1024 {
 						logData = logData[:1024] + "..."
 					}
-					g.logger.Record("POST", reqURICached(r), logData, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+					g.logger.Record("Deny_URL_POST", reqURICached(r), logData, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 					g.wafOutput(w, cfg)
 					return true
 				}
@@ -130,7 +130,7 @@ func (g *Guard) fileUploadCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 							if len(logData) > 1024 {
 								logData = logData[:1024] + "..."
 							}
-							g.logger.Record("POST", reqURICached(r), logData, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+							g.logger.Record("Deny_URL_POST", reqURICached(r), logData, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 							g.wafOutput(w, cfg)
 							return true
 						}

@@ -1,0 +1,18 @@
+{
+	auto_https off
+
+	caddyguard {
+		rule_dir /opt/caddyguard/rule-config
+	}
+}
+
+:19443 {
+	tls /opt/caddyguard/test-config/certs/cert.pem /opt/caddyguard/test-config/certs/key.pem
+
+	log {
+		output stdout
+		format json
+	}
+
+	reverse_proxy 127.0.0.1:8889
+}

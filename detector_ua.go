@@ -48,7 +48,7 @@ func (g *Guard) userAgentAttackCheck(w http.ResponseWriter, r *http.Request, cfg
 		return false
 	}
 	if matched := matchRules(ua, blackRules, true); matched != nil {
-		g.logger.Record("UserAgent", reqURICached(r), "", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+		g.logger.Record("Deny_USER_AGENT", reqURICached(r), "", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 		g.wafOutput(w, cfg)
 		return true
 	}

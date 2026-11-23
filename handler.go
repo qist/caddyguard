@@ -9,17 +9,20 @@ import (
 //
 // 检测顺序（与 nginxguard 完全一致）：
 //  1. 白名单 IP → 放行
-//  2. 动态黑名单（CC 自动拉黑期内）
-//  3. 静态黑名单 IP
-//  4. 白名单 URL → 返回跳过的检测项集合（不再全局放行）
-//  5. User-Agent 检测（白名单 UA 仅跳过此项；白名单 URL 可指定跳过）
-//  6. Referer 检测（白名单 URL 可指定跳过）
-//  7. CC 攻击检测（白名单 URL 可指定跳过）
-//  8. [非 bodyless] 文件上传检测（白名单 URL 可指定跳过）
-//  9. URL 路径检测（纯路径白名单默认跳过此项；可指定跳过）
-// 10. URL 参数检测（白名单 URL 可指定跳过）
-// 11. Cookie 检测（白名单 URL 可指定跳过）
-// 12. [非 bodyless] POST 检测（白名单 URL 可指定跳过）
+//  2. 三层组合规则 combo.jsonl（L1 结果按请求缓存）
+//  3. 动态黑名单（CC 自动拉黑期内）
+//  4. 静态黑名单 IP
+//  5. 白名单 URL → 返回跳过的检测项集合（不再全局放行）
+//  6. User-Agent 检测（白名单 UA 仅跳过此项；白名单 URL 可指定跳过）
+//  7. 请求头检测（白名单 URL 可指定跳过）
+//  8. Referer 检测（白名单 URL 可指定跳过）
+//  9. CC 攻击检测（白名单 URL 可指定跳过）
+//
+// 10. [非 bodyless] 文件上传检测（白名单 URL 可指定跳过）
+// 11. URL 路径检测（纯路径白名单默认跳过此项；可指定跳过）
+// 12. URL 参数检测（白名单 URL 可指定跳过）
+// 13. Cookie 检测（白名单 URL 可指定跳过）
+// 14. [非 bodyless] POST 检测（白名单 URL 可指定跳过）
 //
 // 请求类型分叉（对应 Lua 的 is_bodyless_method 优化）：
 //   - bodyless="on" (默认): GET/HEAD/OPTIONS 跳过文件上传和 POST 检测
@@ -31,17 +34,22 @@ func (g *Guard) runChecks(w http.ResponseWriter, r *http.Request, cfg Config) bo
 		return false
 	}
 
-	// 2. 动态黑名单（CC 自动拉黑期内）
-	if g.dynamicBlackIPCheck(w, r, cfg) {
+	// 2. 三层组合规则（L2 + L3）：先于传统检测，检测器结果按请求缓存
+	if g.runCombo(w, r, cfg) {
 		return true
 	}
 
-	// 3. 静态黑名单 IP
-	if g.blackIPCheck(w, r, cfg) {
+	// 3. 动态黑名单（CC 自动拉黑期内）
+	if g.legacyBlock(w, r, cfg, "dynamic_black_ip") {
 		return true
 	}
 
-	// 4. 白名单 URL → 返回跳过的检测项集合（不再全局放行）
+	// 4. 静态黑名单 IP
+	if g.legacyBlock(w, r, cfg, "black_ip") {
+		return true
+	}
+
+	// 5. 白名单 URL → 返回跳过的检测项集合（不再全局放行）
 	// 对应 Lua: local url_skips = white_url_check()
 	// 纯路径格式默认只跳过 url_attack；扩展格式可指定跳过哪些检测项
 	urlSkips := g.whiteURLCheck(r, cfg)
@@ -50,68 +58,68 @@ func (g *Guard) runChecks(w http.ResponseWriter, r *http.Request, cfg Config) bo
 	method := r.Method
 	isBodyless := cfg.Bodyless != "off" && (method == "GET" || method == "HEAD" || method == "OPTIONS")
 
-	// 5. User-Agent 检测（白名单 UA 仅跳过此项；白名单 URL 可指定跳过）
+	// 6. User-Agent 检测（白名单 UA 仅跳过此项；白名单 URL 可指定跳过）
 	if !(urlSkips != nil && urlSkips.UserAgent) {
-		if g.userAgentAttackCheck(w, r, cfg) {
+		if g.legacyBlock(w, r, cfg, "user_agent") {
 			return true
 		}
 	}
 
-	// 6. 请求头检测（header.rule：绕过类头 / SSRF 元数据头 / Log4Shell 头）
+	// 7. 请求头检测（header.rule：绕过类头 / SSRF 元数据头 / Log4Shell 头）
 	if !(urlSkips != nil && urlSkips.Header) {
-		if g.headerAttackCheck(w, r, cfg) {
+		if g.legacyBlock(w, r, cfg, "header") {
 			return true
 		}
 	}
 
-	// 7. Referer 检测
+	// 8. Referer 检测
 	if !(urlSkips != nil && urlSkips.Referer) {
-		if g.refererCheck(w, r, cfg) {
+		if g.legacyBlock(w, r, cfg, "referer") {
 			return true
 		}
 	}
 
-	// 8. CC 攻击检测
+	// 9. CC 攻击检测
 	if !(urlSkips != nil && urlSkips.CC) {
-		if g.ccAttackCheck(w, r, cfg) {
+		if g.legacyBlock(w, r, cfg, "cc") {
 			return true
 		}
 	}
 
-	// 9. [非 bodyless] 文件上传检测（需解析 multipart，最昂贵）
+	// 10. [非 bodyless] 文件上传检测（需解析 multipart，最昂贵）
 	if !isBodyless {
 		if !(urlSkips != nil && urlSkips.FileUpload) {
-			if g.fileUploadCheck(w, r, cfg) {
+			if g.legacyBlock(w, r, cfg, "file_upload") {
 				return true
 			}
 		}
 	}
 
-	// 10. URL 路径检测（纯路径白名单默认跳过此项）
+	// 11. URL 路径检测（纯路径白名单默认跳过此项）
 	if !(urlSkips != nil && urlSkips.URLAttack) {
-		if g.urlAttackCheck(w, r, cfg) {
+		if g.legacyBlock(w, r, cfg, "url") {
 			return true
 		}
 	}
 
-	// 11. URL 参数检测
+	// 12. URL 参数检测
 	if !(urlSkips != nil && urlSkips.URLArgs) {
-		if g.urlArgsAttackCheck(w, r, cfg) {
+		if g.legacyBlock(w, r, cfg, "url_args") {
 			return true
 		}
 	}
 
-	// 12. Cookie 检测
+	// 13. Cookie 检测
 	if !(urlSkips != nil && urlSkips.Cookie) {
-		if g.cookieAttackCheck(w, r, cfg) {
+		if g.legacyBlock(w, r, cfg, "cookie") {
 			return true
 		}
 	}
 
-	// 13. [非 bodyless] POST 检测（需读取 body，最昂贵）
+	// 14. [非 bodyless] POST 检测（需读取 body，最昂贵）
 	if !isBodyless {
 		if !(urlSkips != nil && urlSkips.Post) {
-			if g.postAttackCheck(w, r, cfg) {
+			if g.legacyBlock(w, r, cfg, "post") {
 				return true
 			}
 		}
@@ -126,6 +134,10 @@ var defaultHTMLBytes = []byte(defaultHTML)
 // wafOutput 输出拦截响应
 // waf_output: "html" → 返回拦截页面，"redirect" → 302 跳转
 func (g *Guard) wafOutput(w http.ResponseWriter, cfg Config) {
+	// 组合规则 dry-run 阶段：检测器只返回结果，不写响应
+	if isDryRunWriter(w) {
+		return
+	}
 	if cfg.WAFOutput == "redirect" {
 		http.Redirect(w, nil, cfg.WAFRedirectURL, http.StatusMovedPermanently)
 		return

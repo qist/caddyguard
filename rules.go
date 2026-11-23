@@ -17,11 +17,11 @@ const hotReloadInterval = 2 * time.Second
 
 // RuleCache 规则缓存：管理所有规则文件、config.json、domain.json 的 mtime 缓存
 type RuleCache struct {
-	mu           sync.RWMutex
-	ruleDir      string
-	files        map[string]*ruleFileEntry // key: filepath
-	domainJSON   *domainConfigEntry
-	globalConfig *globalConfigEntry // config.json 缓存
+	mu            sync.RWMutex
+	ruleDir       string
+	files         map[string]*ruleFileEntry // key: filepath
+	domainJSON    *domainConfigEntry
+	globalConfig  *globalConfigEntry            // config.json 缓存
 	whiteURLFiles map[string]*whiteURLRuleEntry // key: filepath
 
 	// 热加载节流：上次检查 mtime 的时间
@@ -669,6 +669,10 @@ func mergeDomainConfig(base Config, domainCfg map[string]interface{}) Config {
 	}
 	if v, ok := domainCfg["post_body_scan_limit"].(float64); ok {
 		cfg.PostBodyScanLimit = int64(v)
+	}
+	// 组合规则 SCORE 累计阈值（域名级覆盖）
+	if v, ok := domainCfg["score_block_threshold"].(float64); ok && v >= 0 {
+		cfg.ScoreBlockThreshold = int(v)
 	}
 	return cfg
 }

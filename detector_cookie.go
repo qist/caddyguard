@@ -24,7 +24,7 @@ func (g *Guard) cookieAttackCheck(w http.ResponseWriter, r *http.Request, cfg Co
 
 	// 1. 匹配整个 Cookie 头
 	if matched := matchRules(cookieHeader, rules, true); matched != nil {
-		g.logger.Record("Cookie", reqURICached(r), cookieHeader, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+		g.logger.Record("Deny_Cookie", reqURICached(r), cookieHeader, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 		g.wafOutput(w, cfg)
 		return true
 	}
@@ -33,7 +33,7 @@ func (g *Guard) cookieAttackCheck(w http.ResponseWriter, r *http.Request, cfg Co
 	if hasEncodeMarkers(cookieHeader) {
 		if decoded, changed := fullDecode(cookieHeader); changed {
 			if matched := matchRules(decoded, rules, true); matched != nil {
-				g.logger.Record("Cookie", reqURICached(r), cookieHeader, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+				g.logger.Record("Deny_Cookie", reqURICached(r), cookieHeader, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 				g.wafOutput(w, cfg)
 				return true
 			}
@@ -44,7 +44,7 @@ func (g *Guard) cookieAttackCheck(w http.ResponseWriter, r *http.Request, cfg Co
 	for _, cookie := range r.Cookies() {
 		// 原始值匹配
 		if matched := matchRules(cookie.Value, rules, true); matched != nil {
-			g.logger.Record("Cookie", reqURICached(r), cookie.Value, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+			g.logger.Record("Deny_Cookie", reqURICached(r), cookie.Value, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 			g.wafOutput(w, cfg)
 			return true
 		}
@@ -52,7 +52,7 @@ func (g *Guard) cookieAttackCheck(w http.ResponseWriter, r *http.Request, cfg Co
 		if hasEncodeMarkers(cookie.Value) {
 			if decoded, changed := fullDecode(cookie.Value); changed {
 				if matched := matchRules(decoded, rules, true); matched != nil {
-					g.logger.Record("Cookie", reqURICached(r), cookie.Value, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+					g.logger.Record("Deny_Cookie", reqURICached(r), cookie.Value, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 					g.wafOutput(w, cfg)
 					return true
 				}

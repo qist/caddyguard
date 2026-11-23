@@ -23,6 +23,7 @@
     "upload_filename_scan_limit": 0,
     "post_body_scan_limit": 2097152,
     "match_cache": "on",
+    "score_block_threshold": 0,
     "waf_output": "html",
     "waf_redirect_url": "https://www.caddyguard.com"
 }

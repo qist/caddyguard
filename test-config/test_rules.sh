@@ -13,6 +13,7 @@ FAIL=0
 ERRORS=""
 
 # 停掉旧进程
+cp $RULE_DIR/config.json /tmp/config.json.rules.bak 2>/dev/null || true
 kill $(pgrep -x caddy) 2>/dev/null || true
 sleep 1
 
@@ -113,7 +114,7 @@ test_rule "POST base64_decode" 403 -H "User-Agent: Mozilla/5.0" -d "x=base64_dec
 test_rule "POST \$_GET" 403 -H "User-Agent: Mozilla/5.0" -d 'x=$_GET[cmd]' "$TARGET/"
 test_rule "POST \$_POST" 403 -H "User-Agent: Mozilla/5.0" -d 'y=$_POST[data]' "$TARGET/"
 test_rule "POST eval()" 403 -H "User-Agent: Mozilla/5.0" -d "x=eval(base64_decode(aGVsbG8=))" "$TARGET/"
-test_rule "POST system()" 403 -H "User-Agent: Mozilla/5.0" -d "x=system(ls)" "$TARGET/"
+test_rule "POST system()" 403 -H "User-Agent: Mozilla/5.0" -d 'x=system("ls")' "$TARGET/"
 test_rule "POST child_process" 403 -H "User-Agent: Mozilla/5.0" -d "x=require('child_process')" "$TARGET/"
 test_rule "POST SSTI" 403 -H "User-Agent: Mozilla/5.0" -d 'x={{__class__}}' "$TARGET/"
 test_rule "POST NoSQL \$eq(" 403 -H "User-Agent: Mozilla/5.0" -d 'x=$eq(1)' "$TARGET/"
@@ -140,5 +141,6 @@ if [ $FAIL -gt 0 ]; then
 fi
 
 # 清理
+cp /tmp/config.json.rules.bak $RULE_DIR/config.json 2>/dev/null || true
 kill $(pgrep -x caddy) 2>/dev/null || true
 echo "Done!"

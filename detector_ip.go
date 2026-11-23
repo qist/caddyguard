@@ -66,7 +66,7 @@ func (g *Guard) blackIPCheck(w http.ResponseWriter, r *http.Request, cfg Config)
 		return false
 	}
 	if compiled.match(clientIP) {
-		g.logger.Record("BlackIP", reqURICached(r), "", "ip_rule_match", clientIP, r, cfg)
+		g.logger.Record("BlackList_IP", reqURICached(r), "", "ip_rule_match", clientIP, r, cfg)
 		g.wafOutput(w, cfg)
 		return true
 	}
@@ -83,13 +83,13 @@ func (g *Guard) dynamicBlackIPCheck(w http.ResponseWriter, r *http.Request, cfg 
 	}
 	clientIP := g.getClientIPCached(r, cfg)
 	if g.ccStore.IsBanned(clientIP) {
-		g.logger.Record("DynamicBlackIP", reqURICached(r), "", "CC Ban", clientIP, r, cfg)
+		g.logger.Record("Dynamic_Block_IP", reqURICached(r), "", "CC Ban", clientIP, r, cfg)
 		g.wafOutput(w, cfg)
 		return true
 	}
 	if cfg.CCMode == "ip_host" {
 		if g.ccStore.IsBanned(ccBanKey("ip_host", getDomain(r), clientIP)) {
-			g.logger.Record("DynamicBlackIP", reqURICached(r), "", "CC Ban (domain)", clientIP, r, cfg)
+			g.logger.Record("Dynamic_Block_IP", reqURICached(r), "", "CC Ban (domain)", clientIP, r, cfg)
 			g.wafOutput(w, cfg)
 			return true
 		}

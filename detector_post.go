@@ -82,7 +82,7 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 	// multipart 大文件只扫前半段后放行属于部分扫描 fail-open, 必须拒绝。
 	// multipart streaming off 已在上方 return false, 不会到达此处
 	if r.ContentLength > postBodyScanLimit {
-		g.logger.Record("POSTOversize", reqURICached(r), "size:"+strconv.FormatInt(r.ContentLength, 10), "max:"+strconv.FormatInt(postBodyScanLimit, 10), g.getClientIPCached(r, cfg), r, cfg)
+		g.logger.Record("Deny_URL_POST_Oversize", reqURICached(r), "size:"+strconv.FormatInt(r.ContentLength, 10), "max:"+strconv.FormatInt(postBodyScanLimit, 10), g.getClientIPCached(r, cfg), r, cfg)
 		if cfg.WAFEnable == "on" {
 			g.wafOutput(w, cfg)
 		}
@@ -106,7 +106,7 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 		}
 		// ContentLength 未知时二次确认真实大小, 超限拒绝
 		if spool.size > postBodyScanLimit {
-			g.logger.Record("POSTOversize", reqURICached(r), "size:"+strconv.FormatInt(spool.size, 10), "max:"+strconv.FormatInt(postBodyScanLimit, 10), g.getClientIPCached(r, cfg), r, cfg)
+			g.logger.Record("Deny_URL_POST_Oversize", reqURICached(r), "size:"+strconv.FormatInt(spool.size, 10), "max:"+strconv.FormatInt(postBodyScanLimit, 10), g.getClientIPCached(r, cfg), r, cfg)
 			spool.Close()
 			if cfg.WAFEnable == "on" {
 				g.wafOutput(w, cfg)
@@ -117,7 +117,7 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 		matched := scanBodyStreaming(rd, rules)
 		closeRd()
 		if matched != nil {
-			g.logger.Record("POST", reqURICached(r), "-", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+			g.logger.Record("Deny_URL_POST", reqURICached(r), "-", matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 			spool.Close()
 			if wafEnabled {
 				g.wafOutput(w, cfg)
@@ -138,7 +138,7 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 	// 截断检测：如果读取到的字节数超过限制，说明 body 大于阈值
 	// 对应 Lua: file_size > post_body_scan_limit → 拦截
 	if int64(len(bodyBytes)) > postBodyScanLimit {
-		g.logger.Record("POSTOversize", reqURICached(r), "size:>"+strconv.FormatInt(postBodyScanLimit, 10), "max:"+strconv.FormatInt(postBodyScanLimit, 10), g.getClientIPCached(r, cfg), r, cfg)
+		g.logger.Record("Deny_URL_POST_Oversize", reqURICached(r), "size:>"+strconv.FormatInt(postBodyScanLimit, 10), "max:"+strconv.FormatInt(postBodyScanLimit, 10), g.getClientIPCached(r, cfg), r, cfg)
 		if cfg.WAFEnable == "on" {
 			g.wafOutput(w, cfg)
 		}
@@ -157,7 +157,7 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 				// 检查参数名（key）
 				if key != "" {
 					if matched := matchRules(key, rules, true); matched != nil {
-						g.logger.Record("POST", reqURICached(r), "key:"+key, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+						g.logger.Record("Deny_URL_POST", reqURICached(r), "key:"+key, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 						if wafEnabled {
 							g.wafOutput(w, cfg)
 						}
@@ -167,7 +167,7 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 					if hasEncodeMarkers(key) {
 						if decoded, changed := fullDecode(key); changed {
 							if matched := matchRules(decoded, rules, true); matched != nil {
-								g.logger.Record("POST", reqURICached(r), "key:"+key, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+								g.logger.Record("Deny_URL_POST", reqURICached(r), "key:"+key, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 								if wafEnabled {
 									g.wafOutput(w, cfg)
 								}
@@ -183,7 +183,7 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 					continue
 				}
 				if matched := matchRules(val, rules, true); matched != nil {
-					g.logger.Record("POST", reqURICached(r), val, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+					g.logger.Record("Deny_URL_POST", reqURICached(r), val, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 					if wafEnabled {
 						g.wafOutput(w, cfg)
 					}
@@ -193,7 +193,7 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 				if hasEncodeMarkers(val) {
 					if decoded, changed := fullDecode(val); changed {
 						if matched := matchRules(decoded, rules, true); matched != nil {
-							g.logger.Record("POST", reqURICached(r), val, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+							g.logger.Record("Deny_URL_POST", reqURICached(r), val, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 							if wafEnabled {
 								g.wafOutput(w, cfg)
 							}
@@ -215,7 +215,7 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 					}
 				}
 				if rawMatched != nil {
-					g.logger.Record("POST", reqURICached(r), "-", rawMatched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+					g.logger.Record("Deny_URL_POST", reqURICached(r), "-", rawMatched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 					if wafEnabled {
 						g.wafOutput(w, cfg)
 					}
@@ -242,7 +242,7 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 		if len(bodyBytes) > 1024 {
 			logData += "..."
 		}
-		g.logger.Record("POST", reqURICached(r), logData, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+		g.logger.Record("Deny_URL_POST", reqURICached(r), logData, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 		if wafEnabled {
 			g.wafOutput(w, cfg)
 		}
@@ -258,7 +258,7 @@ func (g *Guard) postAttackCheck(w http.ResponseWriter, r *http.Request, cfg Conf
 				if len(logData) > 1024 {
 					logData = logData[:1024] + "..."
 				}
-				g.logger.Record("POST", reqURICached(r), logData, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
+				g.logger.Record("Deny_URL_POST", reqURICached(r), logData, matched.Raw, g.getClientIPCached(r, cfg), r, cfg)
 				if wafEnabled {
 					g.wafOutput(w, cfg)
 				}

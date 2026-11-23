@@ -44,6 +44,12 @@ type Config struct {
 	// 注意：缓存为进程级共享（key 不含域名），此开关仅由 config.json 全局配置生效，
 	//       不支持 domain.json 域名级覆盖
 	MatchCache string `json:"match_cache"`
+
+	// 组合规则 SCORE 累计拦截阈值（对应 Lua config_score_block_threshold）
+	// 0 (默认) = 只记分不拦截；1 = 任意 SCORE 命中即拦截（等价开关）；
+	// >1 = 同一请求累计分值达到该值才拦截
+	// 支持 domain.json 域名级覆盖（score_block_threshold）
+	ScoreBlockThreshold int `json:"score_block_threshold"`
 }
 
 // DefaultConfig 返回默认配置
@@ -80,5 +86,7 @@ func DefaultConfig() Config {
 		PostBodyScanLimit:       2097152, // 2MB：超过此值直接拦截
 
 		MatchCache: "on", // 分段匹配缓存默认开启（config_match_cache）
+
+		ScoreBlockThreshold: 0, // 组合规则 SCORE 默认只记分不拦截
 	}
 }
