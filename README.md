@@ -275,6 +275,15 @@ caddy run --config /etc/caddy/caddy.json
 - **通配符域名**：`*.example.com` → 加载时预解析为列表，按后缀匹配
 - **域名级规则目录**：`rule_dir` 指定域名专用规则目录，该域名请求使用独立规则文件覆盖全局规则
 
+#### 与 NginxGuard 的站点级键名完全一致
+
+`domain.json` 是 NginxGuard 与 CaddyGuard 共用的站点配置表，键名以 NginxGuard 为准（即 `config.lua` 的 `config_*` 去掉前缀），同一份文件可直接给两套引擎使用：
+
+- 支持站点级覆盖：`waf_enable`、`trust_proxy_headers`、`rule_dir`、`white_url_check`、`white_ua_check`、`white_ip_check`、`black_ip_check`、`url_check`、`url_args_check`、`user_agent_check`、`header_check`、`cookie_check`、`cc_check`、`cc_rate`、`cc_mode`、`cc_block_ttl`、`post_check`、`referer_check`、`file_upload_check`、`bodyless`、`multipart_streaming_check`、`upload_filename_scan_limit`、`post_body_scan_limit`、`score_block_threshold`、`waf_output`、`waf_redirect_url`
+- 数值型键（`cc_block_ttl`、`upload_filename_scan_limit`、`post_body_scan_limit`、`score_block_threshold`）与 NginxGuard 的 `tonumber()` 口径一致，**数字和数字字符串都接受**（如 `"600"`、`"1048576"`）
+- `cc_block_ttl: 0` 表示该站点只限速、不自动拉黑
+- `log_dir` 与 `match_cache` 在两边都只按全局配置生效，站点级写了也不会改变行为；NginxGuard 独有的 `output_html` 仅全局生效，CaddyGuard 使用内置拦截页
+
 ### 多域名共享配置
 
 多个域名（如同一站点的多个域名别名）需要相同配置时，支持 nginx `server_name` 风格的逗号分隔 key：

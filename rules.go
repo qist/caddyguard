@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -587,8 +588,46 @@ func (rc *RuleCache) GetDomainConfig() *domainConfigEntry {
 	return newEntry
 }
 
+// domainInt 解析域名级数值配置，与 NginxGuard 的 tonumber() 口径一致：
+// 同时接受 JSON 数字和数字字符串（历史数据里存在 "600" 这类写法）。
+func domainInt(v interface{}) (int64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int64(n), true
+	case int:
+		return int64(n), true
+	case int64:
+		return n, true
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return i, true
+		}
+		if f, err := n.Float64(); err == nil {
+			return int64(f), true
+		}
+	case string:
+		s := strings.TrimSpace(n)
+		if s == "" {
+			return 0, false
+		}
+		if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return i, true
+		}
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return int64(f), true
+		}
+	}
+	return 0, false
+}
+
 // mergeDomainConfig 将域名级 map 配置合并到全局 Config 基线上
 // 在加载阶段执行一次，请求阶段零开销
+//
+// 站点级键名与 NginxGuard 的 domain.json 完全一致（config_* 去掉前缀）：
+// waf_enable / trust_proxy_headers / rule_dir / 各 *_check / cc_* /
+// multipart_streaming_check / upload_filename_scan_limit /
+// post_body_scan_limit / bodyless / waf_output / waf_redirect_url /
+// score_block_threshold。log_dir 与 match_cache 在两边都只按全局生效。
 func mergeDomainConfig(base Config, domainCfg map[string]interface{}) Config {
 	cfg := base // 以全局基线为起点
 	if v, ok := domainCfg["waf_enable"].(string); ok && v != "" {
@@ -597,9 +636,8 @@ func mergeDomainConfig(base Config, domainCfg map[string]interface{}) Config {
 	if v, ok := domainCfg["trust_proxy_headers"].(string); ok && v != "" {
 		cfg.TrustProxyHeaders = v
 	}
-	if v, ok := domainCfg["log_dir"].(string); ok && v != "" {
-		cfg.LogDir = v
-	}
+	// log_dir 与 match_cache 在 NginxGuard 只按全局配置生效（不走 get_effective_config），
+	// 站点级不合并，避免两边行为分叉。
 	if v, ok := domainCfg["rule_dir"].(string); ok && v != "" {
 		cfg.RuleDir = v
 	}
@@ -639,8 +677,9 @@ func mergeDomainConfig(base Config, domainCfg map[string]interface{}) Config {
 	if v, ok := domainCfg["cc_mode"].(string); ok && v != "" {
 		cfg.CCMode = v
 	}
-	if v, ok := domainCfg["cc_block_ttl"].(float64); ok && v > 0 {
-		cfg.CCBlockTTL = int(v)
+	// cc_block_ttl=0 表示该站点只限速、不自动拉黑（与 NginxGuard 一致）
+	if n, ok := domainInt(domainCfg["cc_block_ttl"]); ok && n >= 0 {
+		cfg.CCBlockTTL = int(n)
 	}
 	if v, ok := domainCfg["post_check"].(string); ok && v != "" {
 		cfg.PostCheck = v
@@ -664,15 +703,15 @@ func mergeDomainConfig(base Config, domainCfg map[string]interface{}) Config {
 	if v, ok := domainCfg["multipart_streaming_check"].(string); ok && v != "" {
 		cfg.MultipartStreamingCheck = v
 	}
-	if v, ok := domainCfg["upload_filename_scan_limit"].(float64); ok {
-		cfg.UploadFilenameScanLimit = int64(v)
+	if n, ok := domainInt(domainCfg["upload_filename_scan_limit"]); ok {
+		cfg.UploadFilenameScanLimit = n
 	}
-	if v, ok := domainCfg["post_body_scan_limit"].(float64); ok {
-		cfg.PostBodyScanLimit = int64(v)
+	if n, ok := domainInt(domainCfg["post_body_scan_limit"]); ok {
+		cfg.PostBodyScanLimit = n
 	}
 	// 组合规则 SCORE 累计阈值（域名级覆盖）
-	if v, ok := domainCfg["score_block_threshold"].(float64); ok && v >= 0 {
-		cfg.ScoreBlockThreshold = int(v)
+	if n, ok := domainInt(domainCfg["score_block_threshold"]); ok && n >= 0 {
+		cfg.ScoreBlockThreshold = int(n)
 	}
 	return cfg
 }
